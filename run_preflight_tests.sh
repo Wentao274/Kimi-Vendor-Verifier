@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==================== SGLang 部署配置 ====================
 # SGLang 服务地址，注意以 /v1 结尾
-export KIMI_BASE_URL="http://10.11.75.45:3000/v1"
+export KIMI_BASE_URL="http://127.0.0.1:3000/v1"
 # SGLang 默认不校验 API Key，填任意非空占位值即可；
 # 若启动时指定了 --api-key，则填真实值
 export KIMI_API_KEY="EMPTY"
@@ -11,7 +11,7 @@ export KIMI_API_KEY="EMPTY"
 export MODEL_NAME="kimi-k3"
 
 # 主套件（k3_features / prompt_tokens / tool_call_json_schema）的 thinking 参数格式
-THINK_MODE="opensource"
+THINK_MODE="kimi"
 
 # 并发与重试策略（遇到 429 限流时可将 PARALLEL_JOBS 降为 2 或 1）
 PARALLEL_JOBS=4

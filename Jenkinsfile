@@ -150,8 +150,6 @@ fi
 echo "=== 同步代码 ==="
 export https_proxy=http://10.201.136.68:1080
 export http_proxy=http://10.201.136.68:1080
-git restore .
-git pull
 if command -v git-lfs >/dev/null 2>&1; then
     git lfs pull
 else
