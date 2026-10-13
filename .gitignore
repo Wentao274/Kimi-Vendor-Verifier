@@ -22,6 +22,12 @@ __pycache__/
 # Generated reports
 real_verification_report.json
 
+# Test outputs (local runs)
+outputs/
+
+# Jenkins build outputs (remote side)
+builds/
+
 # Temporary debug scripts
 retry_*.py
 show_*.py
