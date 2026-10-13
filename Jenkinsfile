@@ -191,6 +191,7 @@ ENDSSH"""
 ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
 set -e
 cd ${params.WORK_DIR}
+source .venv/bin/activate
 mkdir -p ${BUILD_OUTPUT_DIR}
 
 export KIMI_BASE_URL="${env.BASE_URL_V1}"

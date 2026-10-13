@@ -19,6 +19,19 @@ RERUNS=3
 RERUNS_DELAY=2
 # =======================================================
 
+# ---------- 确保在 uv 虚拟环境中执行 ----------
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    if [ -f ".venv/bin/activate" ]; then
+        # shellcheck disable=SC1091
+        source .venv/bin/activate
+        echo "Activated uv venv: ${VIRTUAL_ENV}"
+    else
+        echo "ERROR: no active venv and .venv not found in $(pwd)" >&2
+        echo "       create it first: uv venv && uv pip install -r pyproject.toml" >&2
+        exit 1
+    fi
+fi
+
 TIMESTAMP="$(date +%Y%m%d%H%M%S)"
 MODEL_NAME_SAFE="${MODEL_NAME//\//_}"
 OUT_DIR="outputs/${MODEL_NAME_SAFE}_${TIMESTAMP}"

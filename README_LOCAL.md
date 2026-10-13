@@ -68,6 +68,18 @@ ssh 到测试主机执行、把报告/邮件发回**。
 ./run_preflight_tests.sh
 ```
 
+两个入口脚本(`run_preflight_tests.sh` / `run_kimivv_tests.sh`)启动时
+都会先执行"虚拟环境守卫",确保所有测试命令运行在 uv 虚拟环境中:
+
+- 已激活(`VIRTUAL_ENV` 已设置)→ 直接继续;
+- 未激活但仓库根目录存在 `.venv/bin/activate` → 自动 `source` 激活
+  (日志打印 `Activated uv venv: ...`);
+- 连 `.venv` 都没有 → 立即报错退出(`exit 1`),并提示先执行
+  `uv venv && uv pip install -r pyproject.toml`。
+
+Jenkinsfile 的"运行测试" stage 同样会在执行脚本前
+`source .venv/bin/activate`(见第 5 节 stage 详解)。
+
 执行流程(固定 3 轮,与 Jenkins `SUITE=all` 完全等价):
 
 | 轮次 | 命令要点 | junit XML |
@@ -144,7 +156,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | 打印测试参数 | 回显所有入参(含 BASE_URL 拼接结果) |
 | API 连通性预检 | curl `/v1/models` + `/v1/chat/completions`(真实模型发 hello);任一非 200 置 `CONNECTIVITY_FAILED`,后续运行/拉取 stage 跳过,构建置 UNSTABLE |
 | 环境检查 | ① 清理残留进程(`pgrep -af "run_kimivv_tests\.sh\|Kimi-Vendor-Verifier"`,SIGTERM→3s→SIGKILL,排除 jenkins/durable/@tmp) ② `git restore .` + `git pull` + `git lfs pull` ③ 首次自动 `uv venv` + `uv pip install -r pyproject.toml` |
-| 运行测试 | 注入全部环境变量后 `bash run_kimivv_tests.sh`;`catchError` 包裹,失败置 FAILURE 但不阻塞后续 stage |
+| 运行测试 | `source .venv/bin/activate` 后注入全部环境变量,执行 `bash run_kimivv_tests.sh`;`catchError` 包裹,失败置 FAILURE 但不阻塞后续 stage |
 | 拉取报告到Jenkins | 远程 `tar -czf` → `scp` 拉回 → 解压到本地 `reports/<build>/` |
 | 发送邮件 | 解析 `stats.properties` 渲染统计表 + 提取 HTML 报告的 `<style>`/`<body>` 内嵌,附报告与日志;`catchError` 包裹,永远执行 |
 | 清理旧构建 | 远程 `builds/<tester>/` 只保留最近 20 个构建目录 |

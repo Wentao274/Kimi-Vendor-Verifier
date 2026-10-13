@@ -28,6 +28,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# ---------- 确保在 uv 虚拟环境中执行 ----------
+# 已激活(VIRTUAL_ENV 已设置)则跳过;未激活但仓库根目录存在 .venv 则自动 source;
+# 完全没有虚拟环境则报错退出,避免 uv run 解析到错误的环境
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    if [ -f ".venv/bin/activate" ]; then
+        # shellcheck disable=SC1091
+        source .venv/bin/activate
+        echo "Activated uv venv: ${VIRTUAL_ENV}"
+    else
+        echo "ERROR: no active venv and .venv not found in $(pwd)" >&2
+        echo "       create it first: uv venv && uv pip install -r pyproject.toml" >&2
+        exit 1
+    fi
+fi
+
 KIMI_BASE_URL="${KIMI_BASE_URL:-http://127.0.0.1:3000/v1}"
 KIMI_API_KEY="${KIMI_API_KEY:-EMPTY}"
 MODEL_NAME="${MODEL_NAME:-kimi-k3}"
