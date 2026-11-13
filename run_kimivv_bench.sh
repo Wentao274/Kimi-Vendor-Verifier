@@ -130,7 +130,7 @@ echo "RunDir    : ${RUN_DIR}"                            | tee -a "${LOG_FILE}"
 echo "============================================="       | tee -a "${LOG_FILE}"
 
 set +e
-uv run --no-sync python kvv_bench_runner.py "${ARGS[@]}" 2>&1 | tee -a "${LOG_FILE}"
+uv run --no-sync python kvv_bench_runner.py run "${ARGS[@]}" 2>&1 | tee -a "${LOG_FILE}"
 STATUS=${PIPESTATUS[0]}
 set -e
 
