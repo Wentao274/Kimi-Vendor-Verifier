@@ -265,7 +265,8 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 其余暴露参数:`THINK_MODE`(kimi/opensource)、`TEMPERATURE`(1.0)、
 `TOP_P`(0.95)、`EPOCHS`(1)、`MAX_CONNECTIONS`(8,SGLang 自部署请勿
 照抄官方 50)、`CLIENT_TIMEOUT`(86400)、`STREAM`(true)、`HTTP_PROXY`
-(HF 首次下载)、`HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`/`TOOLCALL_LIMIT`。
+(仅用于依赖安装/LFS 拉取/HF 数据集首次下载;评测阶段自动剥离,模型请求
+全直连)、`HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`/`TOOLCALL_LIMIT`。
 
 ### 8.2 stage 一览
 
@@ -278,7 +279,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | 运行评测 | `source .venv/bin/activate` 后双层循环(任务×强度)调 `run_kimivv_bench.sh`,单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties` |
 | 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志) |
 | 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值 |
-| 清理旧构建 | 远程 `builds/<tester>/` 只保留最近 20 个 |
+| 清理旧构建 | 远程 `bench_builds/<tester>/` 只保留最近 20 个(独立命名空间,不触碰功能验证的 `builds/`) |
 
 ### 8.3 环境准备与虚拟环境
 
@@ -327,6 +328,20 @@ OCRBench/MMMU 首次运行会从 HuggingFace 下载数据集(需 `KVB_HTTP_PROXY
 
 ### 8.4 关键说明
 
+- **与功能验证流水线的产物隔离**:两条流水线是独立 Jenkins job,
+  BUILD_NUMBER 各自计数、**完全可能相同**,因此远程产物命名空间彻底
+  分开——功能验证用 `builds/<tester>/<N>`,基准评测用
+  `bench_builds/<tester>/<N>`,各自的"保留最近 20 个构建"清理只作用于
+  自己的命名空间;`/tmp` 中转包分别为 `kvv_<N>.tar.gz` 与
+  `kvv_bench_<N>.tar.gz`,两 job 同号构建并发也不会互相覆盖。Jenkins
+  控制器侧的 `reports/<N>/` 位于各 job 自己的 workspace,天然隔离。
+- **代理与评测隔离**:`HTTP_PROXY` 仅在三处生效——环境准备的依赖
+  安装与 `git lfs pull`、运行评测时 `kvv_bench_runner.py` 构建任务的
+  数据集加载阶段(覆盖 HuggingFace 下载)。数据集就绪后、发起任何
+  模型请求前,`kvv_bench_runner.py` 自动剥离 `https_proxy`/`http_proxy`
+  等代理环境变量,评测全程直连。数据已存在本地则不会重复拉取:
+  `git lfs pull` 按对象增量跳过,HF `load_dataset` 走
+  `~/.cache/huggingface` 缓存。
 - **为什么不直接用 `eval.py`**:上游 CLI 未对 OCRBench/MMMU 暴露
   `--limit`(无法按需截断 MMMU 约 1.17 万样本的全量),且无机读输出。
   `kvv_bench_runner.py` 只做编排,**不改动任何上游文件**;LIMIT 参数

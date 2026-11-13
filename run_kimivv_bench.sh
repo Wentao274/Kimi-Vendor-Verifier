@@ -24,7 +24,7 @@ set -euo pipefail
 #   KVB_TIMEOUT       单请求超时秒数（默认 86400）
 #   KVB_STREAM        是否流式请求（默认 true，长生成保活）
 #   KVB_DATASET       kimi_toolcall 数据集路径（默认仓库内 LFS 文件）
-#   KVB_HTTP_PROXY    代理地址（HuggingFace 数据集首次下载用；空 = 直连）
+#   KVB_HTTP_PROXY    代理地址（仅数据集下载阶段生效；评测阶段由 runner 剥离代理；空 = 直连）
 #   KVB_HF_ENDPOINT   HuggingFace 镜像端点（可选，直连不可达时可设镜像）
 #   KVB_OUT_DIR       评测结果根目录（必填；组合目录 <KVB_OUT_DIR>/<bench>/<effort>/）
 # =======================================================
@@ -44,6 +44,8 @@ if [ -z "${VIRTUAL_ENV:-}" ]; then
         echo "       create it first: uv venv && uv pip install -r pyproject.toml" >&2
         exit 1
     fi
+else
+    echo "uv venv already active: ${VIRTUAL_ENV}"
 fi
 
 : "${KVB_OUT_DIR:?KVB_OUT_DIR is required}"
@@ -68,7 +70,9 @@ RUN_DIR="${KVB_OUT_DIR}/${KVB_BENCH}/${EFFORT_LABEL}"
 LOG_FILE="${RUN_DIR}/bench_${KVB_BENCH}_${EFFORT_LABEL}.log"
 mkdir -p "${RUN_DIR}"
 
-# HuggingFace 数据集首次下载需要网络（MMMU/OCRBench 从 HF 拉取并缓存）
+# 代理仅用于 HuggingFace 数据集下载阶段(进程级 export,覆盖 kvv_bench_runner.py
+# 的数据集加载;已缓存的数据集不会重复下载)。数据集就绪后 kvv_bench_runner.py
+# 会在发起任何模型请求前剥离代理环境变量,评测全程直连。
 if [ -n "${KVB_HTTP_PROXY}" ]; then
     export https_proxy="${KVB_HTTP_PROXY}"
     export http_proxy="${KVB_HTTP_PROXY}"

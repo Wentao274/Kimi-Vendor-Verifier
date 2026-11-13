@@ -4,7 +4,7 @@ pipeline {
     }
 
     parameters {
-        string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填，构建目录分层 builds/<tester>/<build>/）')
+        string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填，基准评测构建目录分层 bench_builds/<tester>/<build>/，与功能验证流水线的 builds/ 互相隔离）')
         string(name: 'MODEL', defaultValue: 'kimi-k3', description: '模型服务名称（必填，即 /v1/models 返回的 id，评测时自动加 kimi/ provider 前缀）')
         string(name: 'BASE_URL', defaultValue: 'http://127.0.0.1:3000', description: 'API 根地址（必填，不带 /v1 后缀，流水线会自动拼接，透传为环境变量 KIMI_BASE_URL）')
         password(name: 'API_KEY', defaultValue: 'EMPTY', description: 'API Key（透传为环境变量 KIMI_API_KEY；SGLang 未开启鉴权时保持 EMPTY）')
@@ -37,7 +37,7 @@ pipeline {
         string(name: 'CLIENT_TIMEOUT', defaultValue: '86400', description: '单请求超时秒数（长生成保活，默认 86400）')
         booleanParam(name: 'STREAM', defaultValue: true, description: '是否流式请求（长生成保活，推荐开启）')
 
-        string(name: 'HTTP_PROXY', defaultValue: 'http://10.201.136.68:1080', description: 'HuggingFace 数据集首次下载用代理（空 = 直连；数据缓存于 ~/.cache/huggingface 后不再依赖）')
+        string(name: 'HTTP_PROXY', defaultValue: 'http://10.201.136.68:1080', description: '代理地址，仅用于依赖安装、git lfs pull、HuggingFace 数据集首次下载（空 = 直连）；评测阶段自动剥离代理，模型请求全直连；数据缓存于 ~/.cache/huggingface 后不再依赖')
         string(name: 'HF_ENDPOINT', defaultValue: '', description: 'HuggingFace 镜像端点（可选，如 https://hf-mirror.com）')
 
         string(name: 'DESCRIPTION', defaultValue: '', description: '模型服务的描述信息（仅用于邮件展示）')
@@ -49,7 +49,11 @@ pipeline {
         SSH_CREDENTIALS = 'HOST_SSH_KEY'
         REMOTE_HOST = '10.201.132.50'
         REMOTE_USER = 'root'
-        BUILD_OUTPUT_DIR = "builds/${params.TESTER}/${BUILD_NUMBER}"
+        // 与功能验证流水线(Jenkinsfile)的 builds/<tester>/<N> 完全隔离:
+        // 两条流水线是独立 Jenkins job,BUILD_NUMBER 各自计数、可能相同,
+        // 基准评测产物走独立命名空间,避免同号构建目录互相嵌套、混入对方
+        // tar 包、或被对方"保留最近 20 个"的清理逻辑误删
+        BUILD_OUTPUT_DIR = "bench_builds/${params.TESTER}/${BUILD_NUMBER}"
         // 用户在 BASE_URL 填根地址（可不带或带 /v1，可带或不带尾斜杠）。
         // 这里 idempotent 拼接出唯一的 OpenAI 兼容端点：
         //   先剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
@@ -207,9 +211,15 @@ else
     echo "未发现残留进程"
 fi
 
-echo "=== 同步 LFS 数据 ==="
-export https_proxy=http://10.201.136.68:1080
-export http_proxy=http://10.201.136.68:1080
+echo "=== 同步 LFS 数据(已拉取的对象自动跳过) ==="
+PROXY="${params.HTTP_PROXY}"
+if [ -n "\${PROXY}" ]; then
+    export https_proxy="\${PROXY}"
+    export http_proxy="\${PROXY}"
+    echo "proxy enabled for lfs pull: \${PROXY}"
+else
+    echo "HTTP_PROXY 为空,lfs pull 直连"
+fi
 if command -v git-lfs >/dev/null 2>&1; then
     git lfs pull
 else
@@ -224,10 +234,13 @@ if [ ! -d ".venv" ]; then
     uv venv
 fi
 echo "同步依赖..."
-export https_proxy=http://10.201.136.68:1080
-export http_proxy=http://10.201.136.68:1080
+if [ -n "\${PROXY}" ]; then
+    export https_proxy="\${PROXY}"
+    export http_proxy="\${PROXY}"
+fi
 source .venv/bin/activate
 uv pip install -r pyproject.toml
+echo "venv python: \$(command -v python)"
 deactivate
 unset https_proxy
 unset http_proxy
@@ -252,6 +265,11 @@ ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
 set -e
 cd ${params.WORK_DIR}
 source .venv/bin/activate
+echo "Active uv venv: \${VIRTUAL_ENV}"
+if [ -z "\${VIRTUAL_ENV:-}" ]; then
+    echo "ERROR: uv venv activation failed" >&2
+    exit 1
+fi
 
 export KIMI_BASE_URL="${env.BASE_URL_V1}"
 export KIMI_API_KEY="${apiKey}"
@@ -465,7 +483,7 @@ ${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; pad
                 sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
                     sh """
 ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
-cd ${params.WORK_DIR}/builds/${params.TESTER} 2>/dev/null || exit 0
+cd ${params.WORK_DIR}/bench_builds/${params.TESTER} 2>/dev/null || exit 0
 ls -t | tail -n +21 | xargs -r rm -rf
 ENDSSH"""
                 }

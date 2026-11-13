@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -101,8 +102,35 @@ def _extract_summary(log: Any, args: argparse.Namespace, extra_body: dict,
     }
 
 
+_PROXY_ENV_VARS = (
+    "https_proxy", "http_proxy", "all_proxy",
+    "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+)
+
+
+def _strip_proxy_env() -> list[str]:
+    """Remove proxy env vars from this process before evaluation starts.
+
+    Datasets are already loaded by ``_build_task`` (HF download / local LFS
+    file); every request from here on goes to the model API and must NOT
+    traverse any proxy (httpx/openai honor these env vars via trust_env).
+    Returns the removed ``var=value`` entries for logging.
+    """
+    removed = []
+    for var in _PROXY_ENV_VARS:
+        val = os.environ.pop(var, None)
+        if val:
+            removed.append(f"{var}={val}")
+    return removed
+
+
 def run_benchmark(args: argparse.Namespace) -> int:
-    task = _build_task(args)
+    task = _build_task(args)  # dataset load/download happens here (proxy OK)
+    removed = _strip_proxy_env()
+    if removed:
+        print("proxy env stripped after dataset load (evaluation runs direct):")
+        for item in removed:
+            print(f"  unset {item}")
     model = args.model if "/" in args.model else f"kimi/{args.model}"
     extra_body = get_thinking_extra_body(
         thinking=args.thinking,
