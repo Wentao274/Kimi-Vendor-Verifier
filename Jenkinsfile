@@ -314,7 +314,7 @@ ${reportStyle ?: fallbackStyle}
 </head>
 <body>
 <div style="background-color: ${bannerColor}; color: white; padding: 18px 20px; border-radius: 5px 5px 0 0; margin-bottom: 10px;">
-    <h2 style="margin: 0;">KVV 模型服务测试报告 - 构建 #${BUILD_NUMBER}</h2>
+    <h2 style="margin: 0;">KVV工程能力预检测试报告 - 构建 #${BUILD_NUMBER}</h2>
 </div>
 ${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; padding: 12px 15px; border-radius: 4px; margin-bottom: 12px;"><strong>API 连通性预检未通过</strong>：本次构建未执行测试，请检查模型服务是否可达（BASE_URL / API_KEY 是否正确），详见构建日志。</div>' : ''}
 <h2>Jenkins 构建信息</h2>
@@ -356,7 +356,7 @@ ${reportBody ?: '<p>未能生成 HTML 测试报告，请查看构建日志与附
                         }
 
                         emailext(
-                            subject: "[KVV 测试报告] ${params.MODEL} - 套件 ${params.SUITE} - 构建 #${BUILD_NUMBER} - ${resultLabel}${rateLabel != 'N/A' ? " (通过率 ${rateLabel})" : ''}",
+                            subject: "[KVV工程能力预检测试报告] ${params.MODEL} - 套件 ${params.SUITE} - 构建 #${BUILD_NUMBER} - ${resultLabel}${rateLabel != 'N/A' ? " (通过率 ${rateLabel})" : ''}",
                             body: emailBody,
                             to: "${params.RECIPIENTS}",
                             mimeType: 'text/html',

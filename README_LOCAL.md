@@ -68,6 +68,26 @@ ssh 到测试主机执行、把报告/邮件发回**。
 > 注:上游已将 params 套件声明为 kimi-only(官方网关只认 kimi 格式);
 > 本仓库面向 SGLang 自部署,双轮跑两种格式正是验证目标,故有意保留。
 
+### 2.4 K3.1 (new_model) 用例标注
+
+上游 k3.1 测试改造引入的 5 个 (new_model) 专属功能模块
+(`test_dynamic_tools` / `test_response_format` / `test_thinking_effort` /
+`test_tokenization_groundtruth` / `test_tool_choice`,模块 docstring 首行均标注
+"(new_model)")对任何被测模型都会执行、不做跳过。被测模型若不含 K3.1 能力
+(如 kimi-k3),这些用例失败属预期(能力缺失),而非部署缺陷。
+
+`generate_test_report.py`(本仓库自建脚本,不改动上游代码)在报告层按模块清单
+(`K31_MODULE_PREFIXES`)给相关套件/用例加 "K3.1 功能" 徽标:
+
+- 一、总览:新增 "K3.1 (new_model) 专属功能用例" 与 "失败(K3.1 范围内)"
+  两行统计,并附徽标图例说明;
+- 二、按套件统计:K3.1 范围套件名后带徽标;
+- 三、失败/错误/跳过明细:K3.1 用例名后带徽标;
+- 五、结论:单独一条列出 K3.1 范围内失败数及所属套件,并说明属预期。
+
+> 注:上游若新增 (new_model) 模块,需同步扩充 `generate_test_report.py`
+> 顶部的 `K31_MODULE_PREFIXES` 清单。邮件正文内嵌该 HTML 报告,徽标样式随之生效。
+
 ---
 
 ## 3. 本地执行:`run_preflight_tests.sh`

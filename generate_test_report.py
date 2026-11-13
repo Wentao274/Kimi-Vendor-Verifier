@@ -46,6 +46,19 @@ CLASS_LABELS = {
     "prompt_tokens/test_prompt_tokens": "prompt_tokens",
 }
 
+# 上游 k3.1 测试改造引入的 (new_model) K3.1 专属功能模块（模块 docstring
+# 首行均标注 "(new_model)"）。这些用例对任何被测模型都会执行、不做跳过；
+# 若被测模型（如 kimi-k3）不含 K3.1 能力，失败属预期（能力缺失）。
+# 报告层按此清单给相关套件/用例加 "K3.1 功能" 徽标，用于区分
+# "K3.1 能力缺失" 与 "部署缺陷"。上游若新增 new_model 模块，需同步扩充。
+K31_MODULE_PREFIXES = (
+    "k3_features/test_dynamic_tools",
+    "k3_features/test_response_format",
+    "k3_features/test_thinking_effort",
+    "k3_features/test_tokenization_groundtruth",
+    "k3_features/test_tool_choice",
+)
+
 
 @dataclass
 class CaseOutcome:
@@ -155,6 +168,17 @@ def _class_display(classname: str) -> str:
     return name.replace(".", "/")
 
 
+def _is_k31_module(display: str) -> bool:
+    return bool(display) and display.startswith(K31_MODULE_PREFIXES)
+
+
+def _k31_badge(is_k31: bool) -> str:
+    if not is_k31:
+        return ""
+    return ("<span class='k31' title='K3.1 (new_model) 专属功能用例："
+            "被测模型不含 K3.1 能力时失败属预期'>K3.1 功能</span>")
+
+
 def _params_mode(junit_file: str) -> str | None:
     """Think-mode tag of a params junit file (opensource / kimi), else None."""
     m = re.search(r"junit_params_([A-Za-z0-9_]+)\.xml$", junit_file)
@@ -230,6 +254,9 @@ tbody tr:hover td { background: #eef5ff; }
 .meta td:first-child { color: #64748b; width: 280px; }
 .ok { color: #047857; font-weight: 600; }
 .bad { color: #b91c1c; font-weight: 600; }
+.k31 { display: inline-block; padding: 0 6px; margin-left: 6px;
+       border-radius: 3px; background: #ede9fe; color: #5b21b6;
+       font-size: 11px; font-weight: 600; vertical-align: 1px; }
 p.note { color: #6b7280; font-size: 12px; margin: -10px 0 18px; }
 ul { padding-left: 22px; }
 li { margin: 4px 0; }
@@ -254,6 +281,11 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
     errors = sum(r.errors for r in runs)
     rate = passed / total * 100 if total else 0.0
 
+    k31_fails = [o for r in runs for o in r.outcomes
+                 if o.kind in ("failure", "error") and _is_k31_module(o.classname)]
+    k31_total = sum(cs.total for r in runs for cs in r.per_class.values()
+                    if _is_k31_module(cs.name))
+
     ts = timestamp or datetime.now().strftime("%Y%m%d%H%M%S")
     run_at = (f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
               if len(ts) >= 14 else ts)
@@ -263,9 +295,9 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
 
     # ---- HTML 头部与样式 ----
     p("<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>")
-    p("<title>KVV 测试结果汇总报告</title>")
+    p("<title>KVV工程能力预检测试报告</title>")
     p(f"<style>{CSS}</style></head><body>")
-    p("<h1>KVV 测试结果汇总报告</h1>")
+    p("<h1>KVV工程能力预检测试报告</h1>")
 
     # ---- 运行信息 ----
     p("<h2>运行信息</h2>")
@@ -298,7 +330,12 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
       f"<tr><td>跳过（上游有意跳过）</td><td>{skipped}</td></tr>"
       f"<tr><td>收集错误</td><td>{errors}</td></tr>"
       f"<tr><td>通过率</td><td>{rate:.2f}%（{passed}/{total}）</td></tr>"
+      f"<tr><td>K3.1 (new_model) 专属功能用例</td><td>{k31_total}</td></tr>"
+      f"<tr><td>失败（K3.1 范围内）</td><td>{len(k31_fails)}</td></tr>"
       "</table>")
+    p("<p class='note'>标注 <span class='k31'>K3.1 功能</span> 的套件/用例属于上游"
+      " (new_model) K3.1 专属功能范围，对不含该能力的模型（如 kimi-k3）失败属预期"
+      "（能力缺失）；未标注的失败才需要按部署/服务问题排查。</p>")
 
     # ---- 二、按套件统计 ----
     p("<h2>二、按套件统计</h2>")
@@ -324,7 +361,7 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
           "<th>跳过</th><th>错误</th><th>累计用时*</th></tr>")
         for cs in sorted(merged.values(),
                          key=lambda c: (c.name not in params_keys, c.name)):
-            p(f"<tr><td>{escape(cs.name)}</td>" + td_num(cs.total) + td_num(cs.passed)
+            p(f"<tr><td>{escape(cs.name)}{_k31_badge(_is_k31_module(cs.name))}</td>" + td_num(cs.total) + td_num(cs.passed)
               + td_num(cs.failed) + td_num(cs.skipped) + td_num(cs.errors)
               + f"<td>{fmt_time(cs.time)}</td></tr>")
         p("</table>")
@@ -342,7 +379,8 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
                 label = "失败" if o.kind == "failure" else "错误"
                 full = f"{o.classname}::{o.name}"
                 p(f"<tr class='bad'><td>{label}</td>"
-                  f"<td>{escape(full)}</td><td>{escape(_zh(o.message))}</td></tr>")
+                  f"<td>{escape(full)}{_k31_badge(_is_k31_module(o.classname))}</td>"
+                  f"<td>{escape(_zh(o.message))}</td></tr>")
             p("</table>")
         if skips:
             p("<details open><summary>跳过用例（点击折叠）</summary>")
@@ -354,7 +392,8 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
             for (cls_name, base), items in sorted(grouped.items()):
                 reasons = {o.message or "—" for o in items}
                 reason = " / ".join(sorted(reasons))
-                p(f"<tr><td>{escape(f'{cls_name}::{base}')}</td>"
+                p(f"<tr><td>{escape(f'{cls_name}::{base}')}"
+                  f"{_k31_badge(_is_k31_module(cls_name))}</td>"
                   f"<td>{len(items)}</td><td>{escape(_zh(reason))}</td></tr>")
             p("</table></details>")
     else:
@@ -400,6 +439,10 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
         p("。</li>")
     else:
         p("<li>无失败用例。</li>")
+    if k31_fails:
+        p(f"<li>其中 <b>{len(k31_fails)}</b> 项失败属于 K3.1 (new_model) 专属功能范围"
+          f"（{'、'.join(sorted({o.classname for o in k31_fails}))}）。"
+          "被测模型若不含 K3.1 能力，此类失败属预期（能力缺失），不计入部署缺陷。</li>")
     if errors:
         p(f"<li>收集错误 <b>{errors}</b> 项（请检查对应 testdata 文件是否损坏或未拉取 LFS）。</li>")
     if skipped:
