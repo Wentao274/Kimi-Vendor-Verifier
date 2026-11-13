@@ -180,6 +180,9 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | Jenkins 参数 | 透传目标 | 默认值 | 说明 |
 |--------------|----------|--------|------|
 | `TESTER` | 目录分层 | `liwt` | 测试人员,`builds/<tester>/<build>/` |
+| `CHIP` | 邮件展示 | `nvidia-h100` | 芯片平台名称 |
+| `ENGINE` | 邮件展示 | `vllm` | 推理框架(vllm/sglang) |
+| `PD` | 邮件展示 | `agg` | PD 分离模式(agg=非PD分离,disagg=PD分离) |
 | `SUITE` | `KVV_SUITE` | `all` | 测试套件选择 |
 | `MODEL` | `MODEL_NAME` | `kimi-k3` | 模型服务名 |
 | `BASE_URL` | `KIMI_BASE_URL`(经 `BASE_URL_V1`) | `http://127.0.0.1:3000` | **根地址,不带 `/v1`**;流水线 `environment` 中 idempotent 拼接(剥尾斜杠→剥结尾 /v1→统一补 /v1) |
@@ -249,10 +252,19 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 
 ### 8.1 评测任务与推荐默认值
 
+任务级配置(样本上限、单次响应最大 tokens)采用 **JSON 参数**(风格与
+evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
+(样本上限,值 `null`=全量,默认
+`{"ocrbench": null, "mmmu": null, "kimi_toolcall": null}`)与
+`TASK_MAX_TOKENS_JSON`(单次响应最大 tokens,默认
+`{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768}`)。每个维度
+一个 JSON,键=评测任务名,**须覆盖所有勾选任务**,运行评测开始时统一
+校验,缺键/非法则快速失败。下表为两个 JSON 参数的默认值(即 K3 推荐口径):
+
 | 评测任务 | 数据来源 | 样本上限默认 | MaxTokens 默认 | 说明 |
 |----------|----------|--------------|----------------|------|
 | OCRBench | HF `echo840/OCRBench`(首次经代理下载并缓存) | 空(全量 1000) | 16384 | 文本识别基准,单图短答 |
-| MMMU | HF `MMMU/MMMU_Pro` standard (10 options)(数 GB,首次下载慢) | 空(全量约 1.17 万) | 98304 | 多模态选择题,1~7 图/题;全量单轮数亿 token,请预留充足时长,快速验证时可用 LIMIT 截断 |
+| MMMU | HF `MMMU/MMMU_Pro` standard (10 options)(数 GB,首次下载慢) | 空(全量约 1.17 万) | 98304 | 多模态选择题,1~7 图/题;全量单轮数亿 token,请预留充足时长,快速验证时可用 `TASK_LIMIT_JSON` 截断 |
 | ToolCall | 仓库内 LFS `toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl`(全量 70 样本) | 空(全量) | 32768 | 即 README K3 表「Tool Call」(`kimi_toolcall`),评分 tool_calls 格式/合法性;**默认勾选** |
 
 思考强度为**布尔多选**(`EFFORT_NONE` / `EFFORT_LOW` / `EFFORT_HIGH` /
@@ -266,7 +278,9 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 `TOP_P`(0.95)、`EPOCHS`(1)、`MAX_CONNECTIONS`(8,SGLang 自部署请勿
 照抄官方 50)、`CLIENT_TIMEOUT`(86400)、`STREAM`(true)、`HTTP_PROXY`
 (仅用于依赖安装/LFS 拉取/HF 数据集首次下载;评测阶段自动剥离,模型请求
-全直连)、`HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`/`TOOLCALL_LIMIT`。
+全直连)、`HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`(kimi_toolcall
+数据集路径)、`CHIP`/`ENGINE`/`PD`(芯片平台/推理框架/PD 分离模式,仅
+邮件展示,与功能验证流水线共用同一组参数定义)。
 
 ### 8.2 stage 一览
 
@@ -276,7 +290,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
 | API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
 | 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench"`) → `git lfs pull` → `uv venv` + `uv pip install -r pyproject.toml` |
-| 运行评测 | `source .venv/bin/activate` 后双层循环(任务×强度)调 `run_kimivv_bench.sh`,单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties` |
+| 运行评测 | `source .venv/bin/activate` 后先校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败),再双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`,单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties` |
 | 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志) |
 | 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值 |
 | 清理旧构建 | 远程 `bench_builds/<tester>/` 只保留最近 20 个(独立命名空间,不触碰功能验证的 `builds/`) |

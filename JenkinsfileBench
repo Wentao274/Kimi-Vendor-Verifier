@@ -5,6 +5,9 @@ pipeline {
 
     parameters {
         string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填，基准评测构建目录分层 bench_builds/<tester>/<build>/，与功能验证流水线的 builds/ 互相隔离）')
+        string(name: 'CHIP', defaultValue: 'nvidia-h100', description: '芯片平台名称(必填)')
+        choice(name: 'ENGINE', choices: ['vllm', 'sglang'], description: '推理框架(必填,仅用于邮件展示)')
+        choice(name: 'PD', choices: ['agg', 'disagg'], description: 'PD分离模式(agg=非PD分离,disagg=PD分离,仅用于邮件展示)')
         string(name: 'MODEL', defaultValue: 'kimi-k3', description: '模型服务名称（必填，即 /v1/models 返回的 id，评测时自动加 kimi/ provider 前缀）')
         string(name: 'BASE_URL', defaultValue: 'http://127.0.0.1:3000', description: 'API 根地址（必填，不带 /v1 后缀，流水线会自动拼接，透传为环境变量 KIMI_BASE_URL）')
         password(name: 'API_KEY', defaultValue: 'EMPTY', description: 'API Key（透传为环境变量 KIMI_API_KEY；SGLang 未开启鉴权时保持 EMPTY）')
@@ -22,14 +25,12 @@ pipeline {
         booleanParam(name: 'EFFORT_HIGH', defaultValue: false, description: 'reasoning_effort=high')
         booleanParam(name: 'EFFORT_MAX', defaultValue: true, description: 'reasoning_effort=max（README K3 推荐基准口径，默认勾选）')
 
-        string(name: 'OCRBENCH_LIMIT', defaultValue: '', description: 'OCRBench 样本上限（默认空 = 全量 1000；需快速验证时可填如 200）')
-        string(name: 'MMMU_LIMIT', defaultValue: '', description: 'MMMU 样本上限（默认空 = 全量约 1.17 万样本，单轮数亿 token，请预留充足时长；需快速验证时可填如 100）')
-        string(name: 'TOOLCALL_LIMIT', defaultValue: '', description: 'kimi_toolcall 样本上限（空 = 全量）')
+        // 按任务配置（JSON，与 evalscope-test 流水线的 TASK_MAX_TOKENS_JSON 风格一致）：
+        // 每个维度一个 JSON 参数，键 = 评测任务名，须覆盖所有勾选任务，缺失/不合法则运行评测开始时校验失败
+        text(name: 'TASK_LIMIT_JSON', defaultValue: '{"ocrbench": null, "mmmu": null, "kimi_toolcall": null}', description: '按任务指定样本上限的 JSON。键=ocrbench/mmmu/kimi_toolcall，值=null（全量）或正整数；须覆盖所有勾选任务，缺失或不合法则校验失败。全量口径：OCRBench 1000 / MMMU 约 1.17 万（单轮数亿 token，请预留充足时长）/ kimi_toolcall 70。快速验证示例：{"ocrbench": 200, "mmmu": 100, "kimi_toolcall": 70}')
+        text(name: 'TASK_MAX_TOKENS_JSON', defaultValue: '{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768}', description: '按任务指定单次响应最大 tokens 的 JSON（默认 = README「Recommended Benchmark Parameters (K3)」：OCRBench 16384 / MMMU 98304 / kimi_toolcall 32768）。键=评测任务名，值=正整数；须覆盖所有勾选任务，缺失或不合法则校验失败')
 
         // 以下默认值 = README「Recommended Benchmark Parameters (K3)」
-        string(name: 'OCRBENCH_MAX_TOKENS', defaultValue: '16384', description: 'OCRBench 单次响应最大 tokens（README 推荐 16384）')
-        string(name: 'MMMU_MAX_TOKENS', defaultValue: '98304', description: 'MMMU 单次响应最大 tokens（README K3 reasoning_effort 推荐 98304）')
-        string(name: 'TOOLCALL_MAX_TOKENS', defaultValue: '32768', description: 'kimi_toolcall 单次响应最大 tokens（README 推荐 32768）')
         string(name: 'TEMPERATURE', defaultValue: '1.0', description: '采样温度（README K3 推荐值 1.0；non-thinking 轮可改 0.6）')
         string(name: 'TOP_P', defaultValue: '0.95', description: 'top_p（README 推荐 0.95）')
         string(name: 'EPOCHS', defaultValue: '1', description: '采样轮数（README 推荐 1）')
@@ -68,13 +69,16 @@ pipeline {
                     println("=== KVV 基准评测参数信息 ===")
                     println("========================================")
                     println("测试人员:     ${params.TESTER}")
+                    println("芯片平台:     ${params.CHIP}")
+                    println("推理框架:     ${params.ENGINE}")
+                    println("PD分离模式:   ${params.PD}")
                     println("评测任务:     ocrbench=${params.RUN_OCRBENCH} mmmu=${params.RUN_MMMU} toolcall=${params.RUN_TOOLCALL}")
                     println("模型名称:     ${params.MODEL}")
                     println("BASE_URL:     ${params.BASE_URL}  (→ ${env.BASE_URL_V1})")
                     println("ThinkMode:    ${params.THINK_MODE}")
                     println("思考强度:     none=${params.EFFORT_NONE} low=${params.EFFORT_LOW} high=${params.EFFORT_HIGH} max=${params.EFFORT_MAX}")
-                    println("样本上限:     ocrbench=${params.OCRBENCH_LIMIT ?: '全量'} mmmu=${params.MMMU_LIMIT ?: '全量(约1.17万)'} toolcall=${params.TOOLCALL_LIMIT ?: '全量'}")
-                    println("MaxTokens:    ocrbench=${params.OCRBENCH_MAX_TOKENS} mmmu=${params.MMMU_MAX_TOKENS} toolcall=${params.TOOLCALL_MAX_TOKENS}")
+                    println("样本上限JSON: ${params.TASK_LIMIT_JSON}")
+                    println("MaxTokens JSON: ${params.TASK_MAX_TOKENS_JSON}")
                     println("温度/topP:    ${params.TEMPERATURE} / ${params.TOP_P}")
                     println("轮数:         ${params.EPOCHS}")
                     println("并发连接数:   ${params.MAX_CONNECTIONS}")
@@ -286,25 +290,66 @@ export KVB_HTTP_PROXY="${params.HTTP_PROXY}"
 export KVB_HF_ENDPOINT="${params.HF_ENDPOINT}"
 export KVB_OUT_DIR="${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench"
 
+# per-task JSON 配置（单引号保护 JSON 内双引号；JSON 本身不含单引号，与 evalscope-test 传参方式一致）
+export KVB_TASK_LIMIT_JSON='${params.TASK_LIMIT_JSON}'
+export KVB_TASK_MAX_TOKENS_JSON='${params.TASK_MAX_TOKENS_JSON}'
+export KVB_BENCHES='${env.BENCHES}'
+
+echo "=== 校验 per-task JSON 配置 ==="
+python3 - <<'PYEOF'
+import json, os, sys
+
+benches = os.environ.get("KVB_BENCHES", "").split()
+if not benches:
+    print("ERROR: 未勾选任何评测任务")
+    sys.exit(1)
+
+configs = {}
+for name in ("KVB_TASK_MAX_TOKENS_JSON", "KVB_TASK_LIMIT_JSON"):
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print("ERROR: %s 不是合法 JSON: %s" % (name, exc))
+        sys.exit(1)
+    if not isinstance(data, dict):
+        print("ERROR: %s 顶层必须是 JSON 对象(键=评测任务名)" % name)
+        sys.exit(1)
+    configs[name] = data
+
+problems = []
+for bench in benches:
+    mt = configs["KVB_TASK_MAX_TOKENS_JSON"].get(bench, "missing")
+    if mt == "missing" or isinstance(mt, bool) or not isinstance(mt, int) or mt <= 0:
+        print("ERROR: TASK_MAX_TOKENS_JSON 缺少任务 %s 或值非正整数(当前: %r)" % (bench, mt))
+        problems.append(bench)
+    lim = configs["KVB_TASK_LIMIT_JSON"].get(bench, "missing")
+    if lim == "missing" or (lim is not None and (isinstance(lim, bool) or not isinstance(lim, int) or lim <= 0)):
+        print("ERROR: TASK_LIMIT_JSON 缺少任务 %s 或值非 null(全量)/正整数(当前: %r)" % (bench, lim))
+        problems.append(bench)
+
+if problems:
+    sys.exit(1)
+
+for bench in benches:
+    lim = configs["KVB_TASK_LIMIT_JSON"][bench]
+    print("per-task config: %-14s limit=%-8s max_tokens=%s" % (bench, "全量" if lim is None else lim, configs["KVB_TASK_MAX_TOKENS_JSON"][bench]))
+print("per-task JSON 校验通过")
+PYEOF
+
 BENCH_ROOT="\${KVB_OUT_DIR}"
 mkdir -p "\${BENCH_ROOT}"
 
 FAILED=0
 for BENCH in ${env.BENCHES}; do
+    KVB_MAX_TOKENS=\$(python3 -c 'import json,os,sys; print(json.loads(os.environ["KVB_TASK_MAX_TOKENS_JSON"])[sys.argv[1]])' "\$BENCH")
+    KVB_LIMIT=\$(python3 -c 'import json,os,sys; v=json.loads(os.environ["KVB_TASK_LIMIT_JSON"])[sys.argv[1]]; print("" if v is None else v)' "\$BENCH")
+    export KVB_MAX_TOKENS KVB_LIMIT
     case "\$BENCH" in
-        ocrbench)
-            export KVB_MAX_TOKENS="${params.OCRBENCH_MAX_TOKENS}"
-            export KVB_LIMIT="${params.OCRBENCH_LIMIT}"
-            export KVB_DATASET=""
-            ;;
-        mmmu)
-            export KVB_MAX_TOKENS="${params.MMMU_MAX_TOKENS}"
-            export KVB_LIMIT="${params.MMMU_LIMIT}"
+        ocrbench|mmmu)
             export KVB_DATASET=""
             ;;
         kimi_toolcall)
-            export KVB_MAX_TOKENS="${params.TOOLCALL_MAX_TOKENS}"
-            export KVB_LIMIT="${params.TOOLCALL_LIMIT}"
             export KVB_DATASET="${params.TOOLCALL_DATASET}"
             ;;
         *) echo "ERROR: unknown bench \$BENCH"; exit 1 ;;
@@ -450,6 +495,9 @@ ${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; pad
 <table>
     <tr><th>构建编号</th><td>#${BUILD_NUMBER}</td></tr>
     <tr><th>测试人员</th><td>${params.TESTER}</td></tr>
+    <tr><th>芯片平台</th><td>${params.CHIP}</td></tr>
+    <tr><th>推理框架</th><td>${params.ENGINE}</td></tr>
+    <tr><th>PD分离模式</th><td>${params.PD}</td></tr>
     <tr><th>模型服务描述</th><td>${params.DESCRIPTION ?: '(无)'}</td></tr>
     <tr><th>评测任务</th><td>${benchList ?: 'N/A'}</td></tr>
     <tr><th>模型名称</th><td>${params.MODEL}</td></tr>
