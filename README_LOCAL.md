@@ -15,6 +15,9 @@ ssh 到测试主机执行、把报告/邮件发回**。
 | `run_kimivv_tests.sh` | Jenkins 触发入口 | 配置全部通过环境变量注入,按 `KVV_SUITE` 选择套件 |
 | `Jenkinsfile` | Jenkins 声明式流水线 | 参数化触发、远程执行、报告拉取、邮件通知 |
 | `generate_test_report.py` | HTML 汇总报告生成器 | 两个入口脚本共用,读 junit XML 出 HTML 报告 |
+| `run_kimivv_bench.sh` | Jenkins 基准评测入口 | 执行单个(评测任务×思考强度)组合,配置全通过 `KVB_*` 环境变量注入 |
+| `kvv_bench_runner.py` | 基准评测运行器 | 包装 inspect-ai 任务,补齐 `--limit` 与机读 `summary.json`,提供 `aggregate` 汇总模式 |
+| `JenkinsfileBench` | Jenkins 声明式流水线 | 基准评测(OCRBench/MMMU/ToolCall),与 `Jenkinsfile` 完全独立,见第 8 节 |
 
 两个入口脚本**相互独立、互不影响**:
 
@@ -235,3 +238,108 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | 邮件统计全 N/A | `find reports/<build> -name stats.properties` 确认是否拉回;没有则看运行测试 stage 日志 |
 | 怀疑上一次构建残留进程干扰 | 环境检查 stage 开头自动清理;也可远程手工 `pgrep -af "run_kimivv_tests\.sh\|Kimi-Vendor-Verifier"` 检查 |
 | 想本地复现 Jenkins 行为 | 按第 4 节表格手工 export 环境变量后 `./run_kimivv_tests.sh`,或直接 `bash run_kimivv_tests.sh` 用默认值 |
+
+---
+
+## 8. 基准评测:`JenkinsfileBench`
+
+与功能验证(`Jenkinsfile`)完全独立的第二条流水线,执行 inspect-ai 基准
+评测。评测任务、思考强度全部参数化,默认值取自
+`README.md`「Recommended Benchmark Parameters (K3)」推荐表。
+
+### 8.1 评测任务与推荐默认值
+
+| 评测任务 | 数据来源 | 样本上限默认 | MaxTokens 默认 | 说明 |
+|----------|----------|--------------|----------------|------|
+| OCRBench | HF `echo840/OCRBench`(首次经代理下载并缓存) | 空(全量 1000) | 16384 | 文本识别基准,单图短答 |
+| MMMU | HF `MMMU/MMMU_Pro` standard (10 options)(数 GB,首次下载慢) | 空(全量约 1.17 万) | 98304 | 多模态选择题,1~7 图/题;全量单轮数亿 token,请预留充足时长,快速验证时可用 LIMIT 截断 |
+| ToolCall | 仓库内 LFS `toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl`(全量 70 样本) | 空(全量) | 32768 | 即 README K3 表「Tool Call」(`kimi_toolcall`),评分 tool_calls 格式/合法性;**默认勾选** |
+
+思考强度为**布尔多选**(`EFFORT_NONE` / `EFFORT_LOW` / `EFFORT_HIGH` /
+`EFFORT_MAX`,默认仅勾选 `max`):每个勾选的强度对每个勾选的评测任务
+各跑一轮,组合数 = 任务数 × 强度数;`none` 即 non-thinking 轮,但
+`kimi_toolcall` 数据集为 thinking-only(上游无 non-thinking 数据集,K3 表
+也只有 low/high/max 三行),该组合在评测项校验与运行循环中**自动跳过**;
+若最终有效组合为空则快速失败。
+
+其余暴露参数:`THINK_MODE`(kimi/opensource)、`TEMPERATURE`(1.0)、
+`TOP_P`(0.95)、`EPOCHS`(1)、`MAX_CONNECTIONS`(8,SGLang 自部署请勿
+照抄官方 50)、`CLIENT_TIMEOUT`(86400)、`STREAM`(true)、`HTTP_PROXY`
+(HF 首次下载)、`HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`/`TOOLCALL_LIMIT`。
+
+### 8.2 stage 一览
+
+| stage | 作用 |
+|-------|------|
+| 打印评测参数 | 回显所有入参(含 BASE_URL 拼接结果) |
+| 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
+| API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
+| 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench"`) → `git lfs pull` → `uv venv` + `uv pip install -r pyproject.toml` |
+| 运行评测 | `source .venv/bin/activate` 后双层循环(任务×强度)调 `run_kimivv_bench.sh`,单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties` |
+| 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志) |
+| 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值 |
+| 清理旧构建 | 远程 `builds/<tester>/` 只保留最近 20 个 |
+
+### 8.3 环境准备与虚拟环境
+
+**所有评测任务强制在 uv 虚拟环境中执行**,与功能验证流水线(第 3 节)
+共用同一套三层保证:
+
+1. **创建/同步**(`JenkinsfileBench` 环境准备 stage):远程仓库根目录若无
+   `.venv` 则自动 `uv venv` 创建,随后 `uv pip install -r pyproject.toml`
+   同步依赖(经代理);
+2. **激活**(运行评测 stage):每轮循环前 `source .venv/bin/activate`;
+3. **守卫**(`run_kimivv_bench.sh` 开头,见 `run_kimivv_bench.sh:37`):
+   - `VIRTUAL_ENV` 已设置(已在 venv 内) → 跳过;
+   - 未激活但仓库根目录存在 `.venv/bin/activate` → 自动 `source`
+     (日志打印 `Activated uv venv: ...`);
+   - 连 `.venv` 都没有 → 报错退出(`exit 1`),提示先执行
+     `uv venv && uv pip install -r pyproject.toml`,不会静默跑在系统环境。
+
+最终执行命令为 `uv run --no-sync python kvv_bench_runner.py ...`:
+`--no-sync` 锁定当前激活的 venv,不访问网络、不改依赖。
+
+**本地手动跑基准评测**的环境准备(与功能验证共用 `.venv`,依赖一致):
+
+```bash
+# 1. 首次:创建并同步虚拟环境(.venv 已存在则跳过)
+uv venv
+source .venv/bin/activate
+uv pip install -r pyproject.toml
+
+# 2. kimi_toolcall 需要仓库内 LFS 数据集
+git lfs pull
+
+# 3. 配置模型与评测组合(示例)
+export KIMI_BASE_URL="http://127.0.0.1:3000/v1"
+export KIMI_API_KEY="EMPTY"
+export MODEL_NAME="kimi-k3"
+export KVB_BENCH="ocrbench"
+export KVB_EFFORT="max"
+export KVB_OUT_DIR="/tmp/kvv_bench_out"
+
+# 4. 执行
+./run_kimivv_bench.sh
+```
+
+OCRBench/MMMU 首次运行会从 HuggingFace 下载数据集(需 `KVB_HTTP_PROXY`
+或 `KVB_HF_ENDPOINT`),之后走本地缓存。
+
+### 8.4 关键说明
+
+- **为什么不直接用 `eval.py`**:上游 CLI 未对 OCRBench/MMMU 暴露
+  `--limit`(无法按需截断 MMMU 约 1.17 万样本的全量),且无机读输出。
+  `kvv_bench_runner.py` 只做编排,**不改动任何上游文件**;LIMIT 参数
+  提供可选截断,默认留空跑全量。
+- **ToolCall 与 K3 表对齐**:即 README「K3」推荐表的 `Tool Call` 基准,
+  推荐口径 temp 1.0 / top_p 0.95 / max_tokens 32768 / epochs 1(流水线
+  默认值一致);上游 `eval.py` 对该任务的内置默认是 epochs=5 /
+  max_connections=5,本流水线以显式参数覆盖为 K3 表口径。
+  评测复放真实对话历史并注入 tools,模型只做一次生成,评分针对
+  tool_calls 的 JSON 合法性、schema 校验、幻觉工具、控制符泄漏等。
+- **HuggingFace 数据集**:首次运行经 `HTTP_PROXY` 下载并缓存在远程主机
+  `~/.cache/huggingface`,之后不再依赖网络。
+- **BEAM(1M) 未接入**:长程记忆基准(35 段对话×20 探测题,单题上下文
+  约 1M token,生成+评审两阶段且需 judge 模型),全量约 7 亿输入 token,
+  与 CI 参数模型不匹配,暂不纳入;需要时按 `beam/README.md` 手动执行。
+- **AIME 2025**:`eval.py` 支持(`epochs=32`),K3 已不推荐,未纳入本流水线。

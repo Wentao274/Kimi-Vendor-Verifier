@@ -1,0 +1,484 @@
+pipeline {
+    agent {
+        label 'master'
+    }
+
+    parameters {
+        string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填，构建目录分层 builds/<tester>/<build>/）')
+        string(name: 'MODEL', defaultValue: 'kimi-k3', description: '模型服务名称（必填，即 /v1/models 返回的 id，评测时自动加 kimi/ provider 前缀）')
+        string(name: 'BASE_URL', defaultValue: 'http://127.0.0.1:3000', description: 'API 根地址（必填，不带 /v1 后缀，流水线会自动拼接，透传为环境变量 KIMI_BASE_URL）')
+        password(name: 'API_KEY', defaultValue: 'EMPTY', description: 'API Key（透传为环境变量 KIMI_API_KEY；SGLang 未开启鉴权时保持 EMPTY）')
+
+        booleanParam(name: 'RUN_OCRBENCH', defaultValue: true, description: '是否评测 OCRBench（OCRBench，文本识别基准，全量 1000 样本）')
+        booleanParam(name: 'RUN_MMMU', defaultValue: true, description: '是否评测 MMMU（MMMU-Pro standard 10 options，多模态理解基准，全量约 1.17 万样本、单轮数亿 token，耗时较长，可用 LIMIT 截断）')
+        booleanParam(name: 'RUN_TOOLCALL', defaultValue: true, description: '是否评测 Tool Call（kimi_toolcall，README K3 推荐表任务之一，全量 70 样本，数据集在仓库 LFS 内，经 git lfs pull 自动同步）')
+        string(name: 'TOOLCALL_DATASET', defaultValue: 'toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl', description: 'kimi_toolcall 数据集路径（仓库内 LFS 文件）')
+
+        choice(name: 'THINK_MODE', choices: ['kimi', 'opensource'], description: 'thinking 参数格式（kimi=官方 API 格式；opensource=vLLM/SGLang 等开源部署格式，默认 kimi）')
+
+        // 思考强度：多选组合，每个勾选的强度都会对每个勾选的评测任务各跑一轮
+        booleanParam(name: 'EFFORT_NONE', defaultValue: false, description: 'reasoning_effort=none（关闭思考，即 non-thinking 轮；注意：kimi_toolcall 数据集为 thinking-only，该任务自动跳过 none 轮）')
+        booleanParam(name: 'EFFORT_LOW', defaultValue: false, description: 'reasoning_effort=low')
+        booleanParam(name: 'EFFORT_HIGH', defaultValue: false, description: 'reasoning_effort=high')
+        booleanParam(name: 'EFFORT_MAX', defaultValue: true, description: 'reasoning_effort=max（README K3 推荐基准口径，默认勾选）')
+
+        string(name: 'OCRBENCH_LIMIT', defaultValue: '', description: 'OCRBench 样本上限（默认空 = 全量 1000；需快速验证时可填如 200）')
+        string(name: 'MMMU_LIMIT', defaultValue: '', description: 'MMMU 样本上限（默认空 = 全量约 1.17 万样本，单轮数亿 token，请预留充足时长；需快速验证时可填如 100）')
+        string(name: 'TOOLCALL_LIMIT', defaultValue: '', description: 'kimi_toolcall 样本上限（空 = 全量）')
+
+        // 以下默认值 = README「Recommended Benchmark Parameters (K3)」
+        string(name: 'OCRBENCH_MAX_TOKENS', defaultValue: '16384', description: 'OCRBench 单次响应最大 tokens（README 推荐 16384）')
+        string(name: 'MMMU_MAX_TOKENS', defaultValue: '98304', description: 'MMMU 单次响应最大 tokens（README K3 reasoning_effort 推荐 98304）')
+        string(name: 'TOOLCALL_MAX_TOKENS', defaultValue: '32768', description: 'kimi_toolcall 单次响应最大 tokens（README 推荐 32768）')
+        string(name: 'TEMPERATURE', defaultValue: '1.0', description: '采样温度（README K3 推荐值 1.0；non-thinking 轮可改 0.6）')
+        string(name: 'TOP_P', defaultValue: '0.95', description: 'top_p（README 推荐 0.95）')
+        string(name: 'EPOCHS', defaultValue: '1', description: '采样轮数（README 推荐 1）')
+        string(name: 'MAX_CONNECTIONS', defaultValue: '8', description: '并发连接数（官方 API 为 50，SGLang 自部署建议 4~8，429 限流时降低）')
+        string(name: 'CLIENT_TIMEOUT', defaultValue: '86400', description: '单请求超时秒数（长生成保活，默认 86400）')
+        booleanParam(name: 'STREAM', defaultValue: true, description: '是否流式请求（长生成保活，推荐开启）')
+
+        string(name: 'HTTP_PROXY', defaultValue: 'http://10.201.136.68:1080', description: 'HuggingFace 数据集首次下载用代理（空 = 直连；数据缓存于 ~/.cache/huggingface 后不再依赖）')
+        string(name: 'HF_ENDPOINT', defaultValue: '', description: 'HuggingFace 镜像端点（可选，如 https://hf-mirror.com）')
+
+        string(name: 'DESCRIPTION', defaultValue: '', description: '模型服务的描述信息（仅用于邮件展示）')
+        text(name: 'RECIPIENTS', defaultValue: 'liwt@zetyun.com', description: '评测报告邮件接收者（逗号分隔）')
+        string(name: 'WORK_DIR', defaultValue: '/dingofs/data2/userdata/liwt/maas-image/Kimi-Vendor-Verifier', description: '测试仓库目录，请不要改动')
+    }
+
+    environment {
+        SSH_CREDENTIALS = 'HOST_SSH_KEY'
+        REMOTE_HOST = '10.201.132.50'
+        REMOTE_USER = 'root'
+        BUILD_OUTPUT_DIR = "builds/${params.TESTER}/${BUILD_NUMBER}"
+        // 用户在 BASE_URL 填根地址（可不带或带 /v1，可带或不带尾斜杠）。
+        // 这里 idempotent 拼接出唯一的 OpenAI 兼容端点：
+        //   先剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
+        BASE_URL_V1 = "${params.BASE_URL.replaceAll('/+\$', '').replaceAll('/?v1\$', '')}/v1"
+    }
+
+    stages {
+        stage('打印评测参数') {
+            steps {
+                script {
+                    println("========================================")
+                    println("=== KVV 基准评测参数信息 ===")
+                    println("========================================")
+                    println("测试人员:     ${params.TESTER}")
+                    println("评测任务:     ocrbench=${params.RUN_OCRBENCH} mmmu=${params.RUN_MMMU} toolcall=${params.RUN_TOOLCALL}")
+                    println("模型名称:     ${params.MODEL}")
+                    println("BASE_URL:     ${params.BASE_URL}  (→ ${env.BASE_URL_V1})")
+                    println("ThinkMode:    ${params.THINK_MODE}")
+                    println("思考强度:     none=${params.EFFORT_NONE} low=${params.EFFORT_LOW} high=${params.EFFORT_HIGH} max=${params.EFFORT_MAX}")
+                    println("样本上限:     ocrbench=${params.OCRBENCH_LIMIT ?: '全量'} mmmu=${params.MMMU_LIMIT ?: '全量(约1.17万)'} toolcall=${params.TOOLCALL_LIMIT ?: '全量'}")
+                    println("MaxTokens:    ocrbench=${params.OCRBENCH_MAX_TOKENS} mmmu=${params.MMMU_MAX_TOKENS} toolcall=${params.TOOLCALL_MAX_TOKENS}")
+                    println("温度/topP:    ${params.TEMPERATURE} / ${params.TOP_P}")
+                    println("轮数:         ${params.EPOCHS}")
+                    println("并发连接数:   ${params.MAX_CONNECTIONS}")
+                    println("流式:         ${params.STREAM}")
+                    println("代理:         ${params.HTTP_PROXY ?: '(直连)'}")
+                    println("HF镜像:       ${params.HF_ENDPOINT ?: '(默认)'}")
+                    println("模型描述:     ${params.DESCRIPTION ?: '(无)'}")
+                    println("邮件接收者:   ${params.RECIPIENTS}")
+                    println("工作目录:     ${params.WORK_DIR}")
+                    println("构建编号:     #${BUILD_NUMBER}")
+                    println("========================================")
+                }
+            }
+        }
+
+        stage('评测项校验') {
+            steps {
+                script {
+                    def benches = []
+                    if (params.RUN_OCRBENCH) { benches.add('ocrbench') }
+                    if (params.RUN_MMMU) { benches.add('mmmu') }
+                    if (params.RUN_TOOLCALL) { benches.add('kimi_toolcall') }
+                    if (!benches) {
+                        error("请至少勾选一个评测任务(OCRBench/MMMU/ToolCall)")
+                    }
+                    def efforts = []
+                    if (params.EFFORT_NONE) { efforts.add('none') }
+                    if (params.EFFORT_LOW) { efforts.add('low') }
+                    if (params.EFFORT_HIGH) { efforts.add('high') }
+                    if (params.EFFORT_MAX) { efforts.add('max') }
+                    if (!efforts) {
+                        error("请至少勾选一个思考强度(none/low/high/max)")
+                    }
+                    env.BENCHES = benches.join(' ')
+                    env.EFFORTS = efforts.join(' ')
+                    // kimi_toolcall 数据集为 thinking-only(K3 表无 non-thinking Tool Call 行),跳过 none 组合
+                    def combos = []
+                    for (b in benches) {
+                        for (e in efforts) {
+                            if (b == 'kimi_toolcall' && e == 'none') {
+                                println("  - 跳过 kimi_toolcall / none (thinking-only 数据集,无 non-thinking 协议)")
+                                continue
+                            }
+                            combos.add("${b} / ${e}")
+                        }
+                    }
+                    if (combos.isEmpty()) {
+                        error("有效评测组合为空：kimi_toolcall 不支持 effort=none，请调整勾选项")
+                    }
+                    println("本次将执行 ${combos.size()} 个评测组合:")
+                    combos.each { println("  - ${it}") }
+                }
+            }
+        }
+
+        stage('API 连通性预检') {
+            steps {
+                sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
+                    script {
+                        def apiKey = params.API_KEY?.toString()?.trim()
+                        if (!apiKey) { apiKey = 'EMPTY' }
+                        try {
+                            sh """
+ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
+set -o pipefail
+{
+    echo "=== 检查 API 连通性 (/v1/models) ==="
+    HTTP_CODE=\$(curl -s --connect-timeout 10 -m 30 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${apiKey}" ${env.BASE_URL_V1}/models)
+    if [ "\${HTTP_CODE}" != "200" ]; then
+        echo "ERROR: API 连通性检查失败, HTTP状态码: \${HTTP_CODE}, URL: ${env.BASE_URL_V1}/models"
+        exit 1
+    fi
+    echo "API /models 连通性检查通过, HTTP状态码: \${HTTP_CODE}"
+
+    echo "=== 检查 Chat Completions 接口 ==="
+    CHAT_RESP=\$(curl -s --connect-timeout 10 -m 60 -w "\\n%{http_code}" ${env.BASE_URL_V1}/chat/completions \\
+        -H "Content-Type: application/json" \\
+        -H "Authorization: Bearer ${apiKey}" \\
+        -d '{"model":"${params.MODEL}","messages":[{"role":"user","content":"hello"}],"max_tokens":10}')
+    CHAT_HTTP_CODE=\$(echo "\${CHAT_RESP}" | tail -1)
+    if [ "\${CHAT_HTTP_CODE}" != "200" ]; then
+        echo "ERROR: Chat Completions 接口检查失败, HTTP状态码: \${CHAT_HTTP_CODE}"
+        echo "响应内容: \$(echo "\${CHAT_RESP}" | head -n -1)"
+        exit 1
+    fi
+    echo "Chat Completions 接口检查通过, HTTP状态码: \${CHAT_HTTP_CODE}"
+} 2>&1 | tee /tmp/kvv_bench_connectivity_${BUILD_NUMBER}.log
+ENDSSH
+"""
+                        } catch (Exception e) {
+                            env.CONNECTIVITY_FAILED = 'true'
+                            currentBuild.result = 'UNSTABLE'
+                            println("=== API 连通性预检失败,后续阶段(环境准备、运行评测、拉取结果)将跳过 ===")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('环境准备') {
+            when {
+                expression { env.CONNECTIVITY_FAILED != 'true' }
+            }
+            steps {
+                sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
+                    sh """
+ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
+set -e
+cd ${params.WORK_DIR}
+echo "工作目录: \$(pwd)"
+
+echo "=== 清理残留评测进程 ==="
+RESIDUAL=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench" 2>/dev/null | grep -vE "jenkins|durable|@tmp" || true)
+if [ -n "\${RESIDUAL}" ]; then
+    echo "发现残留进程:"
+    echo "\${RESIDUAL}"
+    echo "发送 SIGTERM..."
+    echo "\${RESIDUAL}" | awk '{print \$1}' | xargs -r kill -TERM 2>/dev/null || true
+    sleep 3
+    REMAINING=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench" 2>/dev/null | grep -vE "jenkins|durable|@tmp" || true)
+    if [ -n "\${REMAINING}" ]; then
+        echo "残留进程未响应 SIGTERM,发送 SIGKILL..."
+        echo "\${REMAINING}" | awk '{print \$1}' | xargs -r kill -KILL 2>/dev/null || true
+        sleep 1
+    fi
+    FINAL=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench" 2>/dev/null | grep -vE "jenkins|durable|@tmp" || true)
+    if [ -n "\${FINAL}" ]; then
+        echo "WARN: 以下残留进程仍存在,需人工介入:"
+        echo "\${FINAL}"
+    else
+        echo "残留进程清理完成"
+    fi
+else
+    echo "未发现残留进程"
+fi
+
+echo "=== 同步 LFS 数据 ==="
+export https_proxy=http://10.201.136.68:1080
+export http_proxy=http://10.201.136.68:1080
+if command -v git-lfs >/dev/null 2>&1; then
+    git lfs pull
+else
+    echo "警告: git-lfs 不可用，OCRBench/MMMU 为 HF 在线数据集不受影响，kimi_toolcall 数据集可能缺失"
+fi
+unset https_proxy
+unset http_proxy
+
+echo "=== 检查并创建虚拟环境 ==="
+if [ ! -d ".venv" ]; then
+    echo "虚拟环境不存在，创建虚拟环境..."
+    uv venv
+fi
+echo "同步依赖..."
+export https_proxy=http://10.201.136.68:1080
+export http_proxy=http://10.201.136.68:1080
+source .venv/bin/activate
+uv pip install -r pyproject.toml
+deactivate
+unset https_proxy
+unset http_proxy
+echo "=== 虚拟环境准备完成 ==="
+ENDSSH"""
+                }
+            }
+        }
+
+        stage('运行评测') {
+            when {
+                expression { env.CONNECTIVITY_FAILED != 'true' }
+            }
+            steps {
+                script {
+                    def apiKey = params.API_KEY?.toString()?.trim()
+                    if (!apiKey) { apiKey = 'EMPTY' }
+                    sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh """
+ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
+set -e
+cd ${params.WORK_DIR}
+source .venv/bin/activate
+
+export KIMI_BASE_URL="${env.BASE_URL_V1}"
+export KIMI_API_KEY="${apiKey}"
+export MODEL_NAME="${params.MODEL}"
+
+export KVB_THINK_MODE="${params.THINK_MODE}"
+export KVB_TEMPERATURE="${params.TEMPERATURE}"
+export KVB_TOP_P="${params.TOP_P}"
+export KVB_EPOCHS="${params.EPOCHS}"
+export KVB_CONNECTIONS="${params.MAX_CONNECTIONS}"
+export KVB_TIMEOUT="${params.CLIENT_TIMEOUT}"
+export KVB_STREAM="${params.STREAM}"
+export KVB_HTTP_PROXY="${params.HTTP_PROXY}"
+export KVB_HF_ENDPOINT="${params.HF_ENDPOINT}"
+export KVB_OUT_DIR="${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench"
+
+BENCH_ROOT="\${KVB_OUT_DIR}"
+mkdir -p "\${BENCH_ROOT}"
+
+FAILED=0
+for BENCH in ${env.BENCHES}; do
+    case "\$BENCH" in
+        ocrbench)
+            export KVB_MAX_TOKENS="${params.OCRBENCH_MAX_TOKENS}"
+            export KVB_LIMIT="${params.OCRBENCH_LIMIT}"
+            export KVB_DATASET=""
+            ;;
+        mmmu)
+            export KVB_MAX_TOKENS="${params.MMMU_MAX_TOKENS}"
+            export KVB_LIMIT="${params.MMMU_LIMIT}"
+            export KVB_DATASET=""
+            ;;
+        kimi_toolcall)
+            export KVB_MAX_TOKENS="${params.TOOLCALL_MAX_TOKENS}"
+            export KVB_LIMIT="${params.TOOLCALL_LIMIT}"
+            export KVB_DATASET="${params.TOOLCALL_DATASET}"
+            ;;
+        *) echo "ERROR: unknown bench \$BENCH"; exit 1 ;;
+    esac
+    for EFFORT in ${env.EFFORTS}; do
+        if [ "\$BENCH" = "kimi_toolcall" ] && [ "\$EFFORT" = "none" ]; then
+            echo "SKIP: kimi_toolcall / none (thinking-only 数据集,无 non-thinking 协议)"
+            continue
+        fi
+        echo ""
+        echo "########################################"
+        echo "### 评测组合: \$BENCH / effort=\$EFFORT"
+        echo "########################################"
+        export KVB_BENCH="\$BENCH"
+        export KVB_EFFORT="\$EFFORT"
+        set +e
+        bash run_kimivv_bench.sh
+        RC=\$?
+        set -e
+        if [ "\$RC" -ne 0 ]; then
+            FAILED="\$RC"
+            echo "WARN: \$BENCH/\$EFFORT 失败(exit=\$RC),继续执行后续组合"
+        fi
+    done
+done
+
+echo "=== 汇总评测结果 ==="
+uv run --no-sync python kvv_bench_runner.py aggregate "\${BENCH_ROOT}" 2>&1 | tee -a "\${BENCH_ROOT}/bench_aggregate.log" || true
+
+if [ "\$FAILED" -ne 0 ]; then
+    echo "Result: SOME BENCH RUNS FAILED (last exit=\$FAILED)"
+    exit "\$FAILED"
+fi
+echo "Result: ALL BENCH RUNS PASSED"
+ENDSSH"""
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('拉取结果到Jenkins') {
+            when {
+                expression { env.CONNECTIVITY_FAILED != 'true' }
+            }
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
+                        sh """
+mkdir -p reports/${BUILD_NUMBER}
+if ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "[ -d ${params.WORK_DIR}/${BUILD_OUTPUT_DIR} ]"; then
+    ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "tar -czf /tmp/kvv_bench_${BUILD_NUMBER}.tar.gz -C ${params.WORK_DIR}/${BUILD_OUTPUT_DIR} ."
+    scp -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST}:/tmp/kvv_bench_${BUILD_NUMBER}.tar.gz ./reports/${BUILD_NUMBER}/
+    tar -xzf ./reports/${BUILD_NUMBER}/kvv_bench_${BUILD_NUMBER}.tar.gz -C ./reports/${BUILD_NUMBER}/
+    ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "rm -f /tmp/kvv_bench_${BUILD_NUMBER}.tar.gz"
+    echo "=== 拉取结果 ==="
+    ls -la ./reports/${BUILD_NUMBER}/
+else
+    echo "警告: 远程输出目录 ${params.WORK_DIR}/${BUILD_OUTPUT_DIR} 不存在，跳过结果拉取"
+fi
+"""
+                    }
+                }
+            }
+        }
+
+        stage('发送邮件') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    script {
+                        // 解析 bench_summary.properties: bench.<bench>.<effort>.<field>=<value>
+                        def props = [:]
+                        def propsFile = "reports/${BUILD_NUMBER}/bench/bench_summary.properties"
+                        if (fileExists(propsFile)) {
+                            readFile(file: propsFile, encoding: 'UTF-8').split('\n').each { line ->
+                                def idx = line.indexOf('=')
+                                if (idx > 0) {
+                                    props[line.substring(0, idx)] = line.substring(idx + 1)
+                                }
+                            }
+                        }
+
+                        def combos = [] as TreeSet
+                        props.keySet().each { k ->
+                            def m = k =~ /^bench\.([^.]+)\.([^.]+)\.accuracy\$/
+                            if (m.matches()) { combos.add("${m[0][1]}/${m[0][2]}") }
+                        }
+
+                        def benchRows = new StringBuilder()
+                        if (combos.isEmpty()) {
+                            benchRows.append('<tr><td colspan="6">未生成评测汇总（bench_summary.properties 缺失），请查看构建日志与附件。</td></tr>')
+                        } else {
+                            combos.each { comboKey ->
+                                def (bench, effort) = comboKey.split('/')
+                                def acc = props["bench.${bench}.${effort}.accuracy"]
+                                def err = props["bench.${bench}.${effort}.stderr"]
+                                def done = props["bench.${bench}.${effort}.completed"]
+                                def total = props["bench.${bench}.${effort}.total"]
+                                def dur = props["bench.${bench}.${effort}.duration_s"]
+                                def status = props["bench.${bench}.${effort}.status"]
+                                def color = (status == 'success') ? '#4CAF50' : '#f44336'
+                                benchRows.append("""
+    <tr>
+        <td>${bench}</td>
+        <td>${effort}</td>
+        <td style="font-weight: bold; color: #1e3a8a;">${(acc != null && acc != '') ? acc : 'N/A'}</td>
+        <td>${(err != null && err != '') ? err : 'N/A'}</td>
+        <td>${(done != null) ? "${done} / ${total}" : 'N/A'}</td>
+        <td>${dur ?: 'N/A'}</td>
+        <td style="color: ${color}; font-weight: 600;">${status ?: 'N/A'}</td>
+    </tr>""")
+                            }
+                        }
+
+                        def effortList = env.EFFORTS ?: ''
+                        def benchList = env.BENCHES ?: ''
+                        def connectivityFailed = (env.CONNECTIVITY_FAILED == 'true')
+                        def bannerColor = connectivityFailed ? '#f44336' : (currentBuild.currentResult == 'SUCCESS' ? '#4CAF50' : '#ff9800')
+
+                        def emailBody = """
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: 'Segoe UI', 'Microsoft YaHei', Arial, sans-serif; margin: 0 auto; max-width: 1080px; padding: 20px 32px; color: #1f2937; background: #eef1f6; font-size: 14px; line-height: 1.7; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0 18px; background: #ffffff; font-size: 13px; border: 1px solid #d8dfeb; }
+th { background: #e3edfc; color: #1e3a8a; font-weight: 600; }
+th, td { border: 1px solid #d8dfeb; padding: 6px 12px; text-align: left; vertical-align: top; }
+.email-footer { margin-top: 24px; padding: 12px 15px; background-color: #f9f9f9; border-radius: 3px; color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+<div style="background-color: ${bannerColor}; color: white; padding: 18px 20px; border-radius: 5px 5px 0 0; margin-bottom: 10px;">
+    <h2 style="margin: 0;">KVV 基准评测报告 - 构建 #${BUILD_NUMBER}</h2>
+</div>
+${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; padding: 12px 15px; border-radius: 4px; margin-bottom: 12px;"><strong>API 连通性预检未通过</strong>：本次构建未执行评测，请检查模型服务是否可达（BASE_URL / API_KEY 是否正确），详见构建日志。</div>' : ''}
+<h2>评测结果（accuracy）</h2>
+<table>
+    <tr><th>评测任务</th><th>思考强度</th><th>accuracy</th><th>stderr</th><th>完成/总数</th><th>耗时(秒)</th><th>状态</th></tr>
+    ${benchRows}
+</table>
+<h2>Jenkins 构建信息</h2>
+<table>
+    <tr><th>构建编号</th><td>#${BUILD_NUMBER}</td></tr>
+    <tr><th>测试人员</th><td>${params.TESTER}</td></tr>
+    <tr><th>模型服务描述</th><td>${params.DESCRIPTION ?: '(无)'}</td></tr>
+    <tr><th>评测任务</th><td>${benchList ?: 'N/A'}</td></tr>
+    <tr><th>模型名称</th><td>${params.MODEL}</td></tr>
+    <tr><th>API 地址</th><td>${params.BASE_URL}</td></tr>
+    <tr><th>ThinkMode</th><td>${params.THINK_MODE}</td></tr>
+    <tr><th>思考强度</th><td>${effortList ?: 'N/A'}</td></tr>
+    <tr><th>并发连接数</th><td>${params.MAX_CONNECTIONS}</td></tr>
+    <tr><th>构建状态</th><td>${currentBuild.currentResult}</td></tr>
+    <tr><th>执行时间</th><td>${currentBuild.durationString}</td></tr>
+</table>
+<p style="margin-top: 20px;">说明：基准评测为能力测量，无 PASS/FAIL 阈值；accuracy 为 inspect-ai scorer 输出。首跑会经代理下载 HuggingFace 数据集（MMMU 数 GB），之后走本地缓存。</p>
+<p>Jenkins 构建地址: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
+<div class="email-footer">此邮件由 Jenkins 自动发送，请勿回复。</div>
+</body>
+</html>"""
+
+                        emailext(
+                            subject: "[KVV 基准评测] ${params.MODEL} - ${benchList ?: '无评测任务'} - 构建 #${BUILD_NUMBER} - ${currentBuild.currentResult}",
+                            body: emailBody,
+                            to: "${params.RECIPIENTS}",
+                            mimeType: 'text/html',
+                            attachmentsPattern: "reports/${BUILD_NUMBER}/bench/**/bench_*.log,reports/${BUILD_NUMBER}/bench/bench_summary.properties"
+                        )
+                    }
+                }
+            }
+        }
+
+        stage('清理旧构建') {
+            steps {
+                sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
+                    sh """
+ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
+cd ${params.WORK_DIR}/builds/${params.TESTER} 2>/dev/null || exit 0
+ls -t | tail -n +21 | xargs -r rm -rf
+ENDSSH"""
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "reports/${env.BUILD_NUMBER}/**", allowEmptyArchive: true, fingerprint: true
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
+}
