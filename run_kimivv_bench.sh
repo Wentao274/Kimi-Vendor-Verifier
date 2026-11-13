@@ -74,6 +74,14 @@ mkdir -p "${RUN_DIR}"
 # 的数据集加载;已缓存的数据集不会重复下载)。数据集就绪后 kvv_bench_runner.py
 # 会在发起任何模型请求前剥离代理环境变量,评测全程直连。
 if [ -n "${KVB_HTTP_PROXY}" ]; then
+    case "${KVB_HTTP_PROXY}" in
+        *'<'*)
+            echo "KVB_HTTP_PROXY 是占位符(${KVB_HTTP_PROXY}),按直连处理;如需代理请填写真实地址"
+            KVB_HTTP_PROXY=""
+            ;;
+    esac
+fi
+if [ -n "${KVB_HTTP_PROXY}" ]; then
     export https_proxy="${KVB_HTTP_PROXY}"
     export http_proxy="${KVB_HTTP_PROXY}"
     echo "HTTP proxy enabled for dataset download: ${KVB_HTTP_PROXY}"

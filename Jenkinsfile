@@ -23,6 +23,8 @@ pipeline {
         string(name: 'MAX_CASES', defaultValue: '', description: 'tool 套件用例数上限（空 = 不限制，--max-cases）')
         string(name: 'MAX_TOKENS', defaultValue: '2048', description: 'tool 套件单次响应最大 tokens（--max-tokens）')
 
+        string(name: 'HTTP_PROXY', defaultValue: 'http://<proxy-host>:<port>', description: '代理地址占位符，运行时请按此格式填写真实代理，或留空（空 = 直连）；仅用于 git lfs pull（LFS 测试数据集），依赖安装不走代理（直连 pypi）；占位符未替换时按直连处理')
+
         string(name: 'DESCRIPTION', defaultValue: '', description: '模型服务的描述信息（仅用于邮件展示）')
         text(name: 'RECIPIENTS', defaultValue: 'liwt@zetyun.com', description: '测试报告邮件接收者（逗号分隔）')
         string(name: 'WORK_DIR', defaultValue: '/dingofs/data2/userdata/liwt/maas-image/Kimi-Vendor-Verifier', description: '测试仓库目录，请不要改动')
@@ -63,6 +65,7 @@ pipeline {
                     println("Selection:    ${params.SELECTION}")
                     println("MaxCases:     ${params.MAX_CASES ?: '无限制'}")
                     println("MaxTokens:    ${params.MAX_TOKENS}")
+                    println("LFS代理:      ${params.HTTP_PROXY ?: '(直连)'}")
                     println("模型描述:     ${params.DESCRIPTION ?: '(无)'}")
                     println("邮件接收者:   ${params.RECIPIENTS}")
                     println("工作目录:     ${params.WORK_DIR}")
@@ -154,8 +157,16 @@ else
 fi
 
 echo "=== 同步代码 ==="
-export https_proxy=http://10.201.136.68:1080
-export http_proxy=http://10.201.136.68:1080
+PROXY="${params.HTTP_PROXY}"
+# 占位符未替换(值含 '<')时按直连处理
+case "\${PROXY}" in *'<'*) PROXY="" ;; esac
+if [ -n "\${PROXY}" ]; then
+    export https_proxy="\${PROXY}"
+    export http_proxy="\${PROXY}"
+    echo "proxy enabled for lfs pull: \${PROXY}"
+else
+    echo "lfs pull 直连(HTTP_PROXY 为空或占位符未替换)"
+fi
 if command -v git-lfs >/dev/null 2>&1; then
     git lfs pull
 else
@@ -169,14 +180,11 @@ if [ ! -d ".venv" ]; then
     echo "虚拟环境不存在，创建虚拟环境..."
     uv venv
 fi
-echo "同步依赖..."
-export https_proxy=http://10.201.136.68:1080
-export http_proxy=http://10.201.136.68:1080
+echo "同步依赖(不走代理,直连 pypi)..."
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 source .venv/bin/activate
 uv pip install -r pyproject.toml
 deactivate
-unset https_proxy
-unset http_proxy
 echo "=== 虚拟环境准备完成 ==="
 ENDSSH"""
                 }

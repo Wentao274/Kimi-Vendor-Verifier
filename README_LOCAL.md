@@ -166,7 +166,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 |-------|------|
 | 打印测试参数 | 回显所有入参(含 BASE_URL 拼接结果) |
 | API 连通性预检 | curl `/v1/models` + `/v1/chat/completions`(真实模型发 hello);任一非 200 置 `CONNECTIVITY_FAILED`,后续运行/拉取 stage 跳过,构建置 UNSTABLE |
-| 环境检查 | ① 清理残留进程(`pgrep -af "run_kimivv_tests\.sh\|Kimi-Vendor-Verifier"`,SIGTERM→3s→SIGKILL,排除 jenkins/durable/@tmp) ② `git restore .` + `git pull` + `git lfs pull` ③ 首次自动 `uv venv` + `uv pip install -r pyproject.toml` |
+| 环境检查 | ① 清理残留进程(`pgrep -af "run_kimivv_tests\.sh\|Kimi-Vendor-Verifier"`,SIGTERM→3s→SIGKILL,排除 jenkins/durable/@tmp) ② `git lfs pull`(经代理,参数 `HTTP_PROXY`) ③ 首次自动 `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
 | 运行测试 | `source .venv/bin/activate` 后注入全部环境变量,执行 `bash run_kimivv_tests.sh`;`catchError` 包裹,失败置 FAILURE 但不阻塞后续 stage |
 | 拉取报告到Jenkins | 远程 `tar -czf` → `scp` 拉回 → 解压到本地 `reports/<build>/` |
 | 发送邮件 | 解析 `stats.properties` 渲染统计表 + 提取 HTML 报告的 `<style>`/`<body>` 内嵌,附报告与日志;`catchError` 包裹,永远执行 |
@@ -195,6 +195,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | `SELECTION` | `KVV_SELECTION` | `all` | tool 套件选择模式 |
 | `MAX_CASES` | `KVV_MAX_CASES` | 空 | 空 = 不限制 |
 | `MAX_TOKENS` | `KVV_MAX_TOKENS` | `2048` | tool 套件单次响应上限 |
+| `HTTP_PROXY` | LFS 拉取代理 | `http://<proxy-host>:<port>`(占位符) | 仅用于 `git lfs pull`;依赖安装直连;空/占位符未替换 = 直连 |
 | `DESCRIPTION` | 邮件展示 | 空 | 模型服务描述 |
 | `RECIPIENTS` | 邮件收件人 | `liwt@zetyun.com` | 逗号分隔 |
 | `WORK_DIR` | 远程目录 | `/dingofs/data2/userdata/liwt/maas-image/Kimi-Vendor-Verifier` | 远程仓库目录,请勿改动 |
@@ -277,8 +278,9 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 其余暴露参数:`THINK_MODE`(kimi/opensource)、`TEMPERATURE`(1.0)、
 `TOP_P`(0.95)、`EPOCHS`(1)、`MAX_CONNECTIONS`(8,SGLang 自部署请勿
 照抄官方 50)、`CLIENT_TIMEOUT`(86400)、`STREAM`(true)、`HTTP_PROXY`
-(仅用于依赖安装/LFS 拉取/HF 数据集首次下载;评测阶段自动剥离,模型请求
-全直连)、`HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`(kimi_toolcall
+(默认已填内网代理,可留空(空 = 直连);仅用于 LFS 拉取/HF 数据集首次
+下载,**依赖安装不走代理**;评测阶段自动剥离,模型请求全直连)、
+`HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`(kimi_toolcall
 数据集路径)、`CHIP`/`ENGINE`/`PD`(芯片平台/推理框架/PD 分离模式,仅
 邮件展示,与功能验证流水线共用同一组参数定义)。
 
@@ -289,7 +291,7 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 | 打印评测参数 | 回显所有入参(含 BASE_URL 拼接结果) |
 | 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
 | API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
-| 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench"`) → `git lfs pull` → `uv venv` + `uv pip install -r pyproject.toml` |
+| 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench"`) → `git lfs pull`(经代理) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
 | 运行评测 | `source .venv/bin/activate` 后先校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败),再双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`,单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties` |
 | 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志) |
 | 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值 |
@@ -302,7 +304,7 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 
 1. **创建/同步**(`JenkinsfileBench` 环境准备 stage):远程仓库根目录若无
    `.venv` 则自动 `uv venv` 创建,随后 `uv pip install -r pyproject.toml`
-   同步依赖(经代理);
+   同步依赖(不走代理,直连 pypi);
 2. **激活**(运行评测 stage):每轮循环前 `source .venv/bin/activate`;
 3. **守卫**(`run_kimivv_bench.sh` 开头,见 `run_kimivv_bench.sh:37`):
    - `VIRTUAL_ENV` 已设置(已在 venv 内) → 跳过;
@@ -349,13 +351,16 @@ OCRBench/MMMU 首次运行会从 HuggingFace 下载数据集(需 `KVB_HTTP_PROXY
   自己的命名空间;`/tmp` 中转包分别为 `kvv_<N>.tar.gz` 与
   `kvv_bench_<N>.tar.gz`,两 job 同号构建并发也不会互相覆盖。Jenkins
   控制器侧的 `reports/<N>/` 位于各 job 自己的 workspace,天然隔离。
-- **代理与评测隔离**:`HTTP_PROXY` 仅在三处生效——环境准备的依赖
-  安装与 `git lfs pull`、运行评测时 `kvv_bench_runner.py` 构建任务的
-  数据集加载阶段(覆盖 HuggingFace 下载)。数据集就绪后、发起任何
+- **代理与评测隔离**:`HTTP_PROXY` 仅在两处生效——环境准备的
+  `git lfs pull`、运行评测时 `kvv_bench_runner.py` 构建任务的
+  数据集加载阶段(覆盖 HuggingFace 下载)。**依赖安装(`uv pip install`)
+  不走代理**:代理会掐断 pypi 的 TLS 握手(`tls handshake eof`),
+  因此两条流水线的依赖安装均改为始终直连。数据集就绪后、发起任何
   模型请求前,`kvv_bench_runner.py` 自动剥离 `https_proxy`/`http_proxy`
   等代理环境变量,评测全程直连。数据已存在本地则不会重复拉取:
   `git lfs pull` 按对象增量跳过,HF `load_dataset` 走
-  `~/.cache/huggingface` 缓存。
+  `~/.cache/huggingface` 缓存。占位符 `http://<proxy-host>:<port>`
+  未替换时一律按直连处理。
 - **为什么不直接用 `eval.py`**:上游 CLI 未对 OCRBench/MMMU 暴露
   `--limit`(无法按需截断 MMMU 约 1.17 万样本的全量),且无机读输出。
   `kvv_bench_runner.py` 只做编排,**不改动任何上游文件**;LIMIT 参数

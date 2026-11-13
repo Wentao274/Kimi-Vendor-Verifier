@@ -38,7 +38,7 @@ pipeline {
         string(name: 'CLIENT_TIMEOUT', defaultValue: '86400', description: '单请求超时秒数（长生成保活，默认 86400）')
         booleanParam(name: 'STREAM', defaultValue: true, description: '是否流式请求（长生成保活，推荐开启）')
 
-        string(name: 'HTTP_PROXY', defaultValue: 'http://10.201.136.68:1080', description: '代理地址，仅用于依赖安装、git lfs pull、HuggingFace 数据集首次下载（空 = 直连）；评测阶段自动剥离代理，模型请求全直连；数据缓存于 ~/.cache/huggingface 后不再依赖')
+        string(name: 'HTTP_PROXY', defaultValue: 'http://10.201.136.68:1080', description: '代理地址，仅用于 git lfs pull 与 HuggingFace 数据集首次下载（空 = 直连）；依赖安装不走代理（直连 pypi）；评测阶段自动剥离代理，模型请求全直连；数据缓存于 ~/.cache/huggingface 后不再依赖')
         string(name: 'HF_ENDPOINT', defaultValue: '', description: 'HuggingFace 镜像端点（可选，如 https://hf-mirror.com）')
 
         string(name: 'DESCRIPTION', defaultValue: '', description: '模型服务的描述信息（仅用于邮件展示）')
@@ -217,12 +217,14 @@ fi
 
 echo "=== 同步 LFS 数据(已拉取的对象自动跳过) ==="
 PROXY="${params.HTTP_PROXY}"
+# 占位符未替换(值含 '<')时按直连处理
+case "\${PROXY}" in *'<'*) PROXY="" ;; esac
 if [ -n "\${PROXY}" ]; then
     export https_proxy="\${PROXY}"
     export http_proxy="\${PROXY}"
     echo "proxy enabled for lfs pull: \${PROXY}"
 else
-    echo "HTTP_PROXY 为空,lfs pull 直连"
+    echo "lfs pull 直连(HTTP_PROXY 为空或占位符未替换)"
 fi
 if command -v git-lfs >/dev/null 2>&1; then
     git lfs pull
@@ -237,17 +239,12 @@ if [ ! -d ".venv" ]; then
     echo "虚拟环境不存在，创建虚拟环境..."
     uv venv
 fi
-echo "同步依赖..."
-if [ -n "\${PROXY}" ]; then
-    export https_proxy="\${PROXY}"
-    export http_proxy="\${PROXY}"
-fi
+echo "同步依赖(不走代理,直连 pypi)..."
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 source .venv/bin/activate
 uv pip install -r pyproject.toml
 echo "venv python: \$(command -v python)"
 deactivate
-unset https_proxy
-unset http_proxy
 echo "=== 虚拟环境准备完成 ==="
 ENDSSH"""
                 }
