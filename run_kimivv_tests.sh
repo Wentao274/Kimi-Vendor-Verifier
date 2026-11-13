@@ -14,7 +14,7 @@ set -euo pipefail
 #   KIMI_API_KEY      API Key（SGLang 未开启鉴权时填 EMPTY）
 #   MODEL_NAME        模型名，即 /v1/models 返回的 id
 #   KVV_SUITE         all | params | k3_features | prompt_tokens | tool_call_json_schema
-#   KVV_THINK_MODE    主套件 thinking 参数格式：opensource | kimi | none
+#   KVV_THINK_MODE    主套件 thinking 参数格式：opensource | kimi
 #   KVV_THINKING      主套件是否开启 thinking（--thinking，默认 true）
 #   KVV_PARALLEL_JOBS pytest-xdist 并发数（默认 4）
 #   KVV_RERUNS        失败重试次数（默认 3）
@@ -147,9 +147,9 @@ fi
 # ---------- 主套件 ----------
 if [ "${KVV_SUITE}" = "all" ]; then
     echo "" | tee -a "${LOG_FILE}"
-    echo ">>> [main] k3_features + prompt_tokens + tool_call_json_schema (think-mode=${KVV_THINK_MODE})" | tee -a "${LOG_FILE}"
+    echo ">>> [main] k3_features + prompt_tokens + tool_call_json_schema + toolcall_reject_cases (think-mode=${KVV_THINK_MODE})" | tee -a "${LOG_FILE}"
     echo "---------------------------------------------" | tee -a "${LOG_FILE}"
-    run_suite "${JUNIT_MAIN}" tests/k3_features tests/prompt_tokens tests/tool_call_json_schema \
+    run_suite "${JUNIT_MAIN}" tests/k3_features tests/prompt_tokens tests/tool_call_json_schema tests/toolcall_reject_cases \
         --think-mode "${KVV_THINK_MODE}" \
         "${THINKING_ARGS[@]}" \
         "${TOOL_ARGS[@]}" \

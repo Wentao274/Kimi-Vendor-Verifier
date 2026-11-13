@@ -10,7 +10,7 @@ pipeline {
         password(name: 'API_KEY', defaultValue: 'EMPTY', description: 'API Key（透传为环境变量 KIMI_API_KEY；SGLang 未开启鉴权时保持 EMPTY）')
 
         choice(name: 'SUITE', choices: ['all', 'params', 'k3_features', 'prompt_tokens', 'tool_call_json_schema'], description: '测试套件：all=全量（与本地 run_preflight_tests.sh 一致，params 按 opensource+kimi 两轮执行）；params=仅参数约束套件（opensource+kimi 两轮）；其余为执行指定单个套件')
-        choice(name: 'THINK_MODE', choices: ['kimi', 'opensource', 'none'], description: '主套件（k3_features/prompt_tokens/tool_call_json_schema）thinking 参数格式（--think-mode，默认 kimi）')
+        choice(name: 'THINK_MODE', choices: ['kimi', 'opensource'], description: '主套件（k3_features/prompt_tokens/tool_call_json_schema）thinking 参数格式（--think-mode，默认 kimi；上游 conftest 仅支持 kimi/opensource）')
         booleanParam(name: 'THINKING', defaultValue: true, description: 'tool 套件是否开启 thinking（--thinking）')
         string(name: 'PARALLEL_JOBS', defaultValue: '4', description: 'pytest-xdist 并发数（429 限流时可降低）')
         string(name: 'RERUNS', defaultValue: '3', description: '失败用例重试次数')

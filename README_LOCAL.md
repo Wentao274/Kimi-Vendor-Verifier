@@ -30,32 +30,40 @@ ssh 到测试主机执行、把报告/邮件发回**。
 
 ## 2. 测试套件与 think-mode
 
-### 2.1 四个测试套件
+### 2.1 五个测试套件
 
 | 套件目录 | 验证内容 |
 |----------|----------|
 | `tests/params` | 参数约束:不可变参数(temperature/top_p/presence_penalty/frequency_penalty/n)默认值必须被接受、错误值必须被 400 拒绝 |
-| `tests/k3_features` | K3 特性:动态工具、response_format、thinking effort、tool_choice、tokenization groundtruth |
+| `tests/k3_features` | K3 特性:动态工具、response_format、thinking effort、tool_choice、stop、tokenization groundtruth |
 | `tests/prompt_tokens` | prompt token 计数与 groundtruth 比对(测试数据走 git-lfs) |
 | `tests/tool_call_json_schema` | 工具调用 JSON Schema 校验(walle validator cases) |
+| `tests/toolcall_reject_cases` | 非法 tool call 请求(缺 function name 等)必须被 400 拒绝 |
 
-### 2.2 think-mode 三种格式
+### 2.2 think-mode 两种格式
 
-`--think-mode` 控制请求中 thinking 参数的**格式**(三处实现一致:
-`tests/params/test_params.py` 与 `tests/tool_call_json_schema/validator.py`):
+`--think-mode` 控制请求中 thinking 参数的**格式**(实现位于
+`tests/helper.py`(params 等套件)与 `tests/tool_call_json_schema/validator.py`,
+两处语义一致):
 
 | think-mode | 请求 extra_body | 适用 |
-|------------|----------------|------|
+|------------|-----------------|------|
 | `opensource` | `{"chat_template_kwargs": {"thinking": true/false}}` | vLLM/SGLang 等开源部署 |
 | `kimi` | `{"thinking": {"type": "enabled"/"disabled"}}` | Kimi 官方 API 格式 |
-| `none` | `{}`(完全不传) | 两种格式都不支持的 vendor |
+
+> 上游合并后 conftest 的 `--think-mode` choices 已收窄为
+> `kimi | opensource`,不再支持 `none`。
 
 ### 2.3 params 套件必须双轮跑
 
 `tests/params` 的目的是**验证参数本身**,因此无论 THINK_MODE 设成什么,
 该套件固定按 `opensource` 和 `kimi` 两种格式各跑一轮(两个入口脚本行为
-一致),分别产出独立的 junit XML。其余三个套件只需按目标部署实际支持的
-格式选一种发请求,由 `THINK_MODE` 决定。
+一致),分别产出独立的 junit XML。其余主套件按 `THINK_MODE` 选定的
+格式发请求(新增的 `toolcall_reject_cases` 不受 THINK_MODE 影响,
+其用例自带 thinking 参数或完全不传)。
+
+> 注:上游已将 params 套件声明为 kimi-only(官方网关只认 kimi 格式);
+> 本仓库面向 SGLang 自部署,双轮跑两种格式正是验证目标,故有意保留。
 
 ---
 
@@ -86,7 +94,7 @@ Jenkinsfile 的"运行测试" stage 同样会在执行脚本前
 |------|----------|-----------|
 | 1/3 | `pytest tests/params --think-mode opensource` | `junit_params_opensource.xml` |
 | 2/3 | `pytest tests/params --think-mode kimi` | `junit_params_kimi.xml` |
-| 3/3 | `pytest tests/k3_features tests/prompt_tokens tests/tool_call_json_schema --think-mode ${THINK_MODE} --thinking --tool-json-report ...` | `junit_main.xml` |
+| 3/3 | `pytest tests/k3_features tests/prompt_tokens tests/tool_call_json_schema tests/toolcall_reject_cases --think-mode ${THINK_MODE} --thinking --tool-json-report ...` | `junit_main.xml` |
 
 每轮均为 `uv run --no-sync pytest ... -n 4 --reruns 3` 并全程 `tee` 到日志;
 退出码取第一个非零轮次(单轮失败不中断后续轮次,便于一次看全所有失败)。
@@ -134,9 +142,9 @@ HTML 报告由 `generate_test_report.py` 汇总目录下全部 junit XML 生成,
 
 | 值 | 执行内容 |
 |----|----------|
-| `all` | 与本地脚本完全一致:params(opensource) + params(kimi) + 三主套件合跑一轮 |
+| `all` | 与本地脚本完全一致:params(opensource) + params(kimi) + 四个主套件合跑一轮(k3_features + prompt_tokens + tool_call_json_schema + toolcall_reject_cases) |
 | `params` | 仅参数约束套件(仍按 opensource + kimi 双轮) |
-| `k3_features` / `prompt_tokens` / `tool_call_json_schema` | 仅该套件单跑一轮 |
+| `k3_features` / `prompt_tokens` / `tool_call_json_schema` | 仅该套件单跑一轮(toolcall_reject_cases 无独立单跑入口,含在 `all` 中) |
 
 除本地脚本的产物外,额外生成 `stats.properties`(供 Jenkins 邮件 stage
 解析统计:total/passed/failed/skipped/errors/rate/result)。
@@ -173,7 +181,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | `MODEL` | `MODEL_NAME` | `kimi-k3` | 模型服务名 |
 | `BASE_URL` | `KIMI_BASE_URL`(经 `BASE_URL_V1`) | `http://127.0.0.1:3000` | **根地址,不带 `/v1`**;流水线 `environment` 中 idempotent 拼接(剥尾斜杠→剥结尾 /v1→统一补 /v1) |
 | `API_KEY` | `KIMI_API_KEY` | `EMPTY` | password 类型,未鉴权保持 EMPTY |
-| `THINK_MODE` | `KVV_THINK_MODE` | `kimi` | 主套件 thinking 格式(kimi/opensource/none) |
+| `THINK_MODE` | `KVV_THINK_MODE` | `kimi` | 主套件 thinking 格式(kimi/opensource,上游已移除 none) |
 | `THINKING` | `KVV_THINKING` | `true` | 主套件是否传 `--thinking` |
 | `PARALLEL_JOBS` | `KVV_PARALLEL_JOBS` | `4` | 429 限流时可降为 2/1 |
 | `RERUNS` | `KVV_RERUNS` | `3` | 失败重试次数 |

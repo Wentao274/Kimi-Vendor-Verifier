@@ -10,7 +10,7 @@ export KIMI_API_KEY="EMPTY"
 # SGLang 实际服务的模型名，即 /v1/models 返回的 id
 export MODEL_NAME="kimi-k3"
 
-# 主套件（k3_features / prompt_tokens / tool_call_json_schema）的 thinking 参数格式
+# 主套件（k3_features / prompt_tokens / tool_call_json_schema / toolcall_reject_cases）的 thinking 参数格式
 THINK_MODE="kimi"
 
 # 并发与重试策略（遇到 429 限流时可将 PARALLEL_JOBS 降为 2 或 1）
@@ -50,7 +50,7 @@ echo "Base URL  : ${KIMI_BASE_URL}"                    | tee -a "${LOG_FILE}"
 echo "Model     : ${MODEL_NAME}"                       | tee -a "${LOG_FILE}"
 echo "Run 1/3   : tests/params (think-mode=opensource)" | tee -a "${LOG_FILE}"
 echo "Run 2/3   : tests/params (think-mode=kimi)"      | tee -a "${LOG_FILE}"
-echo "Run 3/3   : k3_features + prompt_tokens + tool_call_json_schema (${THINK_MODE})" | tee -a "${LOG_FILE}"
+echo "Run 3/3   : k3_features + prompt_tokens + tool_call_json_schema + toolcall_reject_cases (${THINK_MODE})" | tee -a "${LOG_FILE}"
 echo "Log       : ${LOG_FILE}"                         | tee -a "${LOG_FILE}"
 echo "============================================="     | tee -a "${LOG_FILE}"
 
@@ -94,10 +94,10 @@ set -e
 
 # ---------- [3/3] 其余套件：THINK_MODE 模式 ----------
 echo ""                                                   | tee -a "${LOG_FILE}"
-echo ">>> [3/3] k3_features + prompt_tokens + tool_call_json_schema (think-mode=${THINK_MODE})" | tee -a "${LOG_FILE}"
+echo ">>> [3/3] k3_features + prompt_tokens + tool_call_json_schema + toolcall_reject_cases (think-mode=${THINK_MODE})" | tee -a "${LOG_FILE}"
 echo "---------------------------------------------"     | tee -a "${LOG_FILE}"
 set +e
-uv run --no-sync pytest tests/k3_features tests/prompt_tokens tests/tool_call_json_schema \
+uv run --no-sync pytest tests/k3_features tests/prompt_tokens tests/tool_call_json_schema tests/toolcall_reject_cases \
     --base-url "${KIMI_BASE_URL}" \
     --api-key "${KIMI_API_KEY}" \
     --smoke-model "${MODEL_NAME}" \
