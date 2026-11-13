@@ -46,10 +46,12 @@ CLASS_LABELS = {
     "prompt_tokens/test_prompt_tokens": "prompt_tokens",
 }
 
-# 上游 k3.1 测试改造引入的 (new_model) K3.1 专属功能模块（模块 docstring
-# 首行均标注 "(new_model)"）。这些用例对任何被测模型都会执行、不做跳过；
-# 若被测模型（如 kimi-k3）不含 K3.1 能力，失败属预期（能力缺失）。
-# 报告层按此清单给相关套件/用例加 "K3.1 功能" 徽标，用于区分
+# 上游 k3.1 测试改造引入的 (new_model) 功能模块（模块 docstring 首行均标注
+# "(new_model)"）。这些模块"含" K3.1 新增功能用例，但并非全部用例都是 K3.1
+# 专属——部分用例对 kimi-k3 同样适用（如 test_response_format 对 kimi-k3
+# 全通过）。模块内用例对任何被测模型都会执行、不做跳过；其中 K3.1 专属用例
+# 若失败，对不含该能力的模型（如 kimi-k3）属预期（能力缺失）。
+# 报告层按此清单给相关套件/用例加 "含K3.1功能" 徽标，用于区分
 # "K3.1 能力缺失" 与 "部署缺陷"。上游若新增 new_model 模块，需同步扩充。
 K31_MODULE_PREFIXES = (
     "k3_features/test_dynamic_tools",
@@ -175,8 +177,8 @@ def _is_k31_module(display: str) -> bool:
 def _k31_badge(is_k31: bool) -> str:
     if not is_k31:
         return ""
-    return ("<span class='k31' title='K3.1 (new_model) 专属功能用例："
-            "被测模型不含 K3.1 能力时失败属预期'>K3.1 功能</span>")
+    return ("<span class='k31' title='所属模块含 K3.1 (new_model) 新增功能用例："
+            "被测模型不含对应能力时，相关失败属预期（能力缺失）'>含K3.1功能</span>")
 
 
 def _params_mode(junit_file: str) -> str | None:
@@ -285,6 +287,10 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
                  if o.kind in ("failure", "error") and _is_k31_module(o.classname)]
     k31_total = sum(cs.total for r in runs for cs in r.per_class.values()
                     if _is_k31_module(cs.name))
+    k31_passed = sum(cs.passed for r in runs for cs in r.per_class.values()
+                     if _is_k31_module(cs.name))
+    k31_denom = total - k31_total
+    k31_rate = (passed - k31_passed) / k31_denom * 100 if k31_denom > 0 else 0.0
 
     ts = timestamp or datetime.now().strftime("%Y%m%d%H%M%S")
     run_at = (f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
@@ -330,12 +336,26 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
       f"<tr><td>跳过（上游有意跳过）</td><td>{skipped}</td></tr>"
       f"<tr><td>收集错误</td><td>{errors}</td></tr>"
       f"<tr><td>通过率</td><td>{rate:.2f}%（{passed}/{total}）</td></tr>"
-      f"<tr><td>K3.1 (new_model) 专属功能用例</td><td>{k31_total}</td></tr>"
+      f"<tr><td>含K3.1功能模块的用例</td><td>{k31_total}</td></tr>"
+      f"<tr><td>通过（K3.1 范围内）</td><td>{k31_passed}</td></tr>"
       f"<tr><td>失败（K3.1 范围内）</td><td>{len(k31_fails)}</td></tr>"
-      "</table>")
-    p("<p class='note'>标注 <span class='k31'>K3.1 功能</span> 的套件/用例属于上游"
-      " (new_model) K3.1 专属功能范围，对不含该能力的模型（如 kimi-k3）失败属预期"
-      "（能力缺失）；未标注的失败才需要按部署/服务问题排查。</p>")
+      + (f"<tr><td>通过率（剔除含K3.1功能模块用例后）</td>"
+         f"<td>{k31_rate:.2f}%（{passed - k31_passed}/{k31_denom}）</td></tr>"
+         if k31_total else "")
+      + "</table>")
+    if k31_total:
+        k31_skipped = k31_total - k31_passed - len(k31_fails)
+        p(f"<p class='note'>计算算法：通过率 = 总通过 / 总用例（跳过、错误计为未通过）。"
+          f"通过率（剔除含K3.1功能模块用例后）=（总通过 {passed} − K3.1 范围通过"
+          f" {k31_passed}）/（总用例 {total} − K3.1 范围用例 {k31_total}）：分子与分母"
+          f"同时整块剔除 {len(K31_MODULE_PREFIXES)} 个 (new_model) 模块的全部用例——"
+          f"K3.1 范围 {k31_total} 例 = 通过 {k31_passed} + 失败 {len(k31_fails)} + "
+          f"跳过 {k31_skipped}（跳过既不计通过也不计失败）；K3.1 范围内通过的用例"
+          f"不再计入分子。</p>")
+    p("<p class='note'>标注 <span class='k31'>含K3.1功能</span> 表示该套件/用例所属模块"
+      " 含上游 (new_model) K3.1 新增功能用例，并非全部用例均为 K3.1 专属；"
+      "对不含该能力的模型（如 kimi-k3），其中 K3.1 专属用例失败属预期（能力缺失）；"
+      "未标注的失败才需要按部署/服务问题排查。</p>")
 
     # ---- 二、按套件统计 ----
     p("<h2>二、按套件统计</h2>")
@@ -440,9 +460,11 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
     else:
         p("<li>无失败用例。</li>")
     if k31_fails:
-        p(f"<li>其中 <b>{len(k31_fails)}</b> 项失败属于 K3.1 (new_model) 专属功能范围"
+        p(f"<li>其中 <b>{len(k31_fails)}</b> 项失败位于含 K3.1 (new_model) 新增功能的套件"
           f"（{'、'.join(sorted({o.classname for o in k31_fails}))}）。"
-          "被测模型若不含 K3.1 能力，此类失败属预期（能力缺失），不计入部署缺陷。</li>")
+          "此类套件并非全部用例均为 K3.1 专属：源于 K3.1 专属能力的失败"
+          "（被测模型不含该能力）属预期（能力缺失），不计入部署缺陷；"
+          "套件内其余用例失败仍需按部署问题排查。</li>")
     if errors:
         p(f"<li>收集错误 <b>{errors}</b> 项（请检查对应 testdata 文件是否损坏或未拉取 LFS）。</li>")
     if skipped:
