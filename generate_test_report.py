@@ -51,8 +51,9 @@ CLASS_LABELS = {
 # 专属——部分用例对 kimi-k3 同样适用（如 test_response_format 对 kimi-k3
 # 全通过）。模块内用例对任何被测模型都会执行、不做跳过；其中 K3.1 专属用例
 # 若失败，对不含该能力的模型（如 kimi-k3）属预期（能力缺失）。
-# 报告层按此清单给相关套件/用例加 "含K3.1功能" 徽标，用于区分
-# "K3.1 能力缺失" 与 "部署缺陷"。上游若新增 new_model 模块，需同步扩充。
+# 报告层按此清单加徽标（用于区分 "K3.1 能力缺失" 与 "部署缺陷"）：
+# 套件行（聚合）标 "含K3.1功能"，明细用例行（个体）标 "K3.1功能"。
+# 上游若新增 new_model 模块，需同步扩充。
 K31_MODULE_PREFIXES = (
     "k3_features/test_dynamic_tools",
     "k3_features/test_response_format",
@@ -174,11 +175,14 @@ def _is_k31_module(display: str) -> bool:
     return bool(display) and display.startswith(K31_MODULE_PREFIXES)
 
 
-def _k31_badge(is_k31: bool) -> str:
+def _k31_badge(is_k31: bool, *, suite: bool = False) -> str:
     if not is_k31:
         return ""
-    return ("<span class='k31' title='所属模块含 K3.1 (new_model) 新增功能用例："
-            "被测模型不含对应能力时，相关失败属预期（能力缺失）'>含K3.1功能</span>")
+    if suite:
+        return ("<span class='k31' title='该套件含 K3.1 (new_model) 新增功能用例："
+                "被测模型不含对应能力时，相关失败属预期（能力缺失）'>含K3.1功能</span>")
+    return ("<span class='k31' title='该用例所属模块为 K3.1 (new_model) 功能模块："
+            "被测模型不含对应能力时，此类失败属预期（能力缺失）'>K3.1功能</span>")
 
 
 def _params_mode(junit_file: str) -> str | None:
@@ -352,9 +356,10 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
           f"K3.1 范围 {k31_total} 例 = 通过 {k31_passed} + 失败 {len(k31_fails)} + "
           f"跳过 {k31_skipped}（跳过既不计通过也不计失败）；K3.1 范围内通过的用例"
           f"不再计入分子。</p>")
-    p("<p class='note'>标注 <span class='k31'>含K3.1功能</span> 表示该套件/用例所属模块"
-      " 含上游 (new_model) K3.1 新增功能用例，并非全部用例均为 K3.1 专属；"
-      "对不含该能力的模型（如 kimi-k3），其中 K3.1 专属用例失败属预期（能力缺失）；"
+    p("<p class='note'>标注说明：套件行标注 <span class='k31'>含K3.1功能</span> 表示该套件"
+      "含上游 (new_model) K3.1 新增功能用例，并非全部用例均为 K3.1 专属；明细用例行标注"
+      " <span class='k31'>K3.1功能</span> 表示该用例所属模块为 K3.1 功能模块。"
+      "对不含该能力的模型（如 kimi-k3），K3.1 专属用例失败属预期（能力缺失）；"
       "未标注的失败才需要按部署/服务问题排查。</p>")
 
     # ---- 二、按套件统计 ----
@@ -381,7 +386,7 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
           "<th>跳过</th><th>错误</th><th>累计用时*</th></tr>")
         for cs in sorted(merged.values(),
                          key=lambda c: (c.name not in params_keys, c.name)):
-            p(f"<tr><td>{escape(cs.name)}{_k31_badge(_is_k31_module(cs.name))}</td>" + td_num(cs.total) + td_num(cs.passed)
+            p(f"<tr><td>{escape(cs.name)}{_k31_badge(_is_k31_module(cs.name), suite=True)}</td>" + td_num(cs.total) + td_num(cs.passed)
               + td_num(cs.failed) + td_num(cs.skipped) + td_num(cs.errors)
               + f"<td>{fmt_time(cs.time)}</td></tr>")
         p("</table>")
