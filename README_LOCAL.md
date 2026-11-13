@@ -166,7 +166,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 |-------|------|
 | 打印测试参数 | 回显所有入参(含 BASE_URL 拼接结果) |
 | API 连通性预检 | curl `/v1/models` + `/v1/chat/completions`(真实模型发 hello);任一非 200 置 `CONNECTIVITY_FAILED`,后续运行/拉取 stage 跳过,构建置 UNSTABLE |
-| 环境检查 | ① 清理残留进程(`pgrep -af "run_kimivv_tests\.sh\|Kimi-Vendor-Verifier"`,SIGTERM→3s→SIGKILL,排除 jenkins/durable/@tmp) ② `git lfs pull`(经代理,参数 `HTTP_PROXY`) ③ 首次自动 `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
+| 环境检查 | ① 清理残留进程(`pgrep -af "run_kimivv_tests\.sh\|Kimi-Vendor-Verifier"`,SIGTERM→3s→SIGKILL,排除 jenkins/durable/@tmp/kvv_bench/bench_builds,**不会误杀并发运行中的基准评测进程**) ② `git lfs pull`(经代理,参数 `HTTP_PROXY`) ③ 首次自动 `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
 | 运行测试 | `source .venv/bin/activate` 后注入全部环境变量,执行 `bash run_kimivv_tests.sh`;`catchError` 包裹,失败置 FAILURE 但不阻塞后续 stage |
 | 拉取报告到Jenkins | 远程 `tar -czf` → `scp` 拉回 → 解压到本地 `reports/<build>/` |
 | 发送邮件 | 解析 `stats.properties` 渲染统计表 + 提取 HTML 报告的 `<style>`/`<body>` 内嵌,附报告与日志;`catchError` 包裹,永远执行 |
@@ -174,6 +174,11 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 
 连通性预检失败时:运行/拉取 stage 被跳过,邮件照常发出,内含红色
 告警框提示检查 BASE_URL / API_KEY。
+
+同一 job 已通过 `disableConcurrentBuilds()` 禁止并发构建(否则新构建的
+"清理残留进程"会误杀上一构建尚在运行的测试进程);与基准评测 job
+(`JenkinsfileBench`)之间可以安全并发,双方清理步骤互相排除对方进程
+(见 8.4)。
 
 ### 5.2 Jenkins 参数清单
 
@@ -291,7 +296,7 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 | 打印评测参数 | 回显所有入参(含 BASE_URL 拼接结果) |
 | 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
 | API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
-| 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench"`) → `git lfs pull`(经代理) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
+| 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench"`,排除 run_kimivv_tests,**不会误杀并发运行中的功能验证进程**) → `git lfs pull`(经代理) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
 | 运行评测 | `source .venv/bin/activate` 后先校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败),再双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`,单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties` |
 | 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志) |
 | 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值 |
@@ -351,6 +356,16 @@ OCRBench/MMMU 首次运行会从 HuggingFace 下载数据集(需 `KVB_HTTP_PROXY
   自己的命名空间;`/tmp` 中转包分别为 `kvv_<N>.tar.gz` 与
   `kvv_bench_<N>.tar.gz`,两 job 同号构建并发也不会互相覆盖。Jenkins
   控制器侧的 `reports/<N>/` 位于各 job 自己的 workspace,天然隔离。
+- **进程清理互不误杀**:"清理残留进程"只匹配本流水线自身的进程特征,
+  并显式排除对方进程——功能验证排除 `kvv_bench`/`bench_builds`
+  (基准评测的 runner/包装脚本/tar 拉取都带这些标识),基准评测排除
+  `run_kimivv_tests`。因此一条流水线触发时**不会**杀掉另一条正在
+  运行的流水线进程(修复前功能验证的模式含仓库名 `Kimi-Vendor-Verifier`,
+  会误杀带绝对 out-dir 参数的 `kvv_bench_runner.py`)。排除项全部是
+  对方独有、自身命令行不可能出现的标识,**不影响清理各自残留进程**
+  (功能验证的 pytest 经 `--junitxml` 绝对路径携带仓库名,基准评测的
+  runner/包装脚本本身即含 `kvv_bench` 标识)。两个 job 均已
+  设置 `disableConcurrentBuilds()`,同一 job 自身也不会并发构建。
 - **代理与评测隔离**:`HTTP_PROXY` 仅在两处生效——环境准备的
   `git lfs pull`、运行评测时 `kvv_bench_runner.py` 构建任务的
   数据集加载阶段(覆盖 HuggingFace 下载)。**依赖安装(`uv pip install`)

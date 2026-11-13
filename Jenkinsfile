@@ -3,6 +3,12 @@ pipeline {
         label 'master'
     }
 
+    options {
+        // 禁止同一 job 并发构建:串行化"清理残留进程"等破坏性步骤,
+        // 避免新构建误杀上一构建尚未结束的测试/评测进程
+        disableConcurrentBuilds()
+    }
+
     parameters {
         string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填）')
         string(name: 'CHIP', defaultValue: 'nvidia-h100', description: '芯片平台名称(必填)')
@@ -132,20 +138,23 @@ cd ${params.WORK_DIR}
 echo "工作目录: \$(pwd)"
 
 echo "=== 清理残留进程 ==="
-RESIDUAL=\$(pgrep -af "run_kimivv_tests\\.sh|Kimi-Vendor-Verifier" 2>/dev/null | grep -vE "jenkins|durable|@tmp" || true)
+# 正向模式匹配本流水线产物进程;排除 kvv_bench/bench_builds 后,
+# 即使功能验证触发时基准评测流水线正在运行,也不会误杀其
+# runner(kvv_bench_runner.py)、包装脚本、tar/scp 拉取等进程
+RESIDUAL=\$(pgrep -af "run_kimivv_tests\\.sh|Kimi-Vendor-Verifier" 2>/dev/null | grep -vE "jenkins|durable|@tmp|kvv_bench|bench_builds" || true)
 if [ -n "\${RESIDUAL}" ]; then
     echo "发现残留进程:"
     echo "\${RESIDUAL}"
     echo "发送 SIGTERM..."
     echo "\${RESIDUAL}" | awk '{print \$1}' | xargs -r kill -TERM 2>/dev/null || true
     sleep 3
-    REMAINING=\$(pgrep -af "run_kimivv_tests\\.sh|Kimi-Vendor-Verifier" 2>/dev/null | grep -vE "jenkins|durable|@tmp" || true)
+    REMAINING=\$(pgrep -af "run_kimivv_tests\\.sh|Kimi-Vendor-Verifier" 2>/dev/null | grep -vE "jenkins|durable|@tmp|kvv_bench|bench_builds" || true)
     if [ -n "\${REMAINING}" ]; then
         echo "残留进程未响应 SIGTERM,发送 SIGKILL..."
         echo "\${REMAINING}" | awk '{print \$1}' | xargs -r kill -KILL 2>/dev/null || true
         sleep 1
     fi
-    FINAL=\$(pgrep -af "run_kimivv_tests\\.sh|Kimi-Vendor-Verifier" 2>/dev/null | grep -vE "jenkins|durable|@tmp" || true)
+    FINAL=\$(pgrep -af "run_kimivv_tests\\.sh|Kimi-Vendor-Verifier" 2>/dev/null | grep -vE "jenkins|durable|@tmp|kvv_bench|bench_builds" || true)
     if [ -n "\${FINAL}" ]; then
         echo "WARN: 以下残留进程仍存在,需人工介入:"
         echo "\${FINAL}"
