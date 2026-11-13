@@ -11,11 +11,11 @@ pipeline {
 
     parameters {
         string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填）')
-        string(name: 'CHIP', defaultValue: 'nvidia-h100', description: '芯片平台名称(必填)')
-        choice(name: 'ENGINE', choices: ['vllm', 'sglang'], description: '推理框架(必填,仅用于邮件展示)')
+        string(name: 'CHIP', defaultValue: 'nvidia-b300', description: '芯片平台名称(必填)')
+        choice(name: 'ENGINE', choices: ['sglang', 'vllm'], description: '推理框架(必填,仅用于邮件展示)')
         choice(name: 'PD', choices: ['agg', 'disagg'], description: 'PD分离模式(agg=非PD分离,disagg=PD分离,仅用于邮件展示)')
         string(name: 'MODEL', defaultValue: 'kimi-k3', description: '模型服务名称（必填，透传为环境变量 MODEL_NAME，即 /v1/models 返回的 id）')
-        string(name: 'BASE_URL', defaultValue: 'http://127.0.0.1:3000', description: 'API 根地址（必填，不带 /v1 后缀，流水线会自动拼接，透传为环境变量 KIMI_BASE_URL）')
+        string(name: 'BASE_URL', defaultValue: 'https://token-bj11.alayanew.com:26443', description: 'API 根地址（必填，不带 /v1 后缀，流水线会自动拼接，透传为环境变量 KIMI_BASE_URL）')
         password(name: 'API_KEY', defaultValue: 'EMPTY', description: 'API Key（透传为环境变量 KIMI_API_KEY；SGLang 未开启鉴权时保持 EMPTY）')
 
         choice(name: 'SUITE', choices: ['all', 'params', 'k3_features', 'prompt_tokens', 'tool_call_json_schema'], description: '测试套件：all=全量（与本地 run_preflight_tests.sh 一致，params 按 opensource+kimi 两轮执行）；params=仅参数约束套件（opensource+kimi 两轮）；其余为执行指定单个套件')

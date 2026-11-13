@@ -185,12 +185,12 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | Jenkins 参数 | 透传目标 | 默认值 | 说明 |
 |--------------|----------|--------|------|
 | `TESTER` | 目录分层 | `liwt` | 测试人员,`builds/<tester>/<build>/` |
-| `CHIP` | 邮件展示 | `nvidia-h100` | 芯片平台名称 |
-| `ENGINE` | 邮件展示 | `vllm` | 推理框架(vllm/sglang) |
+| `CHIP` | 邮件展示 | `nvidia-b300` | 芯片平台名称 |
+| `ENGINE` | 邮件展示 | `sglang` | 推理框架(sglang/vllm) |
 | `PD` | 邮件展示 | `agg` | PD 分离模式(agg=非PD分离,disagg=PD分离) |
 | `SUITE` | `KVV_SUITE` | `all` | 测试套件选择 |
 | `MODEL` | `MODEL_NAME` | `kimi-k3` | 模型服务名 |
-| `BASE_URL` | `KIMI_BASE_URL`(经 `BASE_URL_V1`) | `http://127.0.0.1:3000` | **根地址,不带 `/v1`**;流水线 `environment` 中 idempotent 拼接(剥尾斜杠→剥结尾 /v1→统一补 /v1) |
+| `BASE_URL` | `KIMI_BASE_URL`(经 `BASE_URL_V1`) | `https://token-bj11.alayanew.com:26443` | **根地址,不带 `/v1`**;流水线 `environment` 中 idempotent 拼接(剥尾斜杠→剥结尾 /v1→统一补 /v1) |
 | `API_KEY` | `KIMI_API_KEY` | `EMPTY` | password 类型,未鉴权保持 EMPTY |
 | `THINK_MODE` | `KVV_THINK_MODE` | `kimi` | 主套件 thinking 格式(kimi/opensource,上游已移除 none) |
 | `THINKING` | `KVV_THINKING` | `true` | 主套件是否传 `--thinking` |
