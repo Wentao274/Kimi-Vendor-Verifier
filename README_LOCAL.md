@@ -83,13 +83,20 @@ ssh 到测试主机执行、把报告/邮件发回**。
 明细用例行"K3.1功能"):
 
 - 一、总览:新增 "含K3.1功能模块的用例" "通过(K3.1 范围内)" "失败(K3.1 范围内)"
-  三行统计;存在 K3.1 范围用例时,追加 "通过率(剔除含K3.1功能模块用例后)"——
-  分子与分母同时剔除 5 个 (new_model) 模块的全部用例(模块粒度,其中 K3.1
-  范围内通过的用例亦不再计入通过);表格下方以注解形式给出完整计算公式
-  与 K3.1 范围的通过/失败/跳过分解;原总通过率行保留;并附徽标图例说明;
+  三行统计;存在 K3.1 范围用例且被测模型**不是** K3.1 时,追加
+  "通过率(剔除含K3.1功能模块用例后)"——分子与分母同时剔除 5 个 (new_model)
+  模块的全部用例(模块粒度,其中 K3.1 范围内通过的用例亦不再计入通过);
+  表格下方以注解形式给出完整计算公式与 K3.1 范围的通过/失败/跳过分解;
+  原总通过率行保留;并附徽标图例说明;
 - 二、按套件统计:含 K3.1 功能的套件名后带 "含K3.1功能" 徽标(套件为聚合体,故用"含");
 - 三、失败/错误/跳过明细:相关用例名后带 "K3.1功能" 徽标(个体用例,不用"含");
-- 五、结论:单独一条列出 K3.1 范围内失败数及所属套件,并说明属预期。
+- 五、结论:单独一条列出 K3.1 范围内失败数及所属套件;非 K3.1 模型时说明
+  属预期(能力缺失),K3.1 模型时说明需按功能实现/部署问题排查。
+
+**被测模型即 K3.1(模型名含 `k3.1`,如 `kimi-k3.1`)时语义反转**:K3.1 功能
+模块的失败不再是"能力缺失"预期——不显示 "剔除后通过率" 行;徽标悬停提示、
+标注说明与结论均改为"并非能力缺失,需按功能实现/部署问题排查";K3.1 范围
+统计行照常保留。按 `--model` 自动判定,无需额外参数。
 
 > 注:上游若新增 (new_model) 模块,需同步扩充 `generate_test_report.py`
 > 顶部的 `K31_MODULE_PREFIXES` 清单。邮件正文内嵌该 HTML 报告,徽标样式随之生效。
@@ -287,10 +294,10 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 任务级配置(样本上限、单次响应最大 tokens)采用 **JSON 参数**(风格与
 evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 (样本上限,值 `null`=全量,默认
-`{"ocrbench": null, "mmmu": null, "kimi_toolcall": null}`)与
+`{"ocrbench": null, "mmmu": null, "kimi_toolcall": null, "beam": null}`)与
 `TASK_MAX_TOKENS_JSON`(单次响应最大 tokens,默认
-`{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768}`)。每个维度
-一个 JSON,键=评测任务名,**须覆盖所有勾选任务**,运行评测开始时统一
+`{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768, "beam": 65536}`)。
+每个维度一个 JSON,键=评测任务名,**须覆盖所有勾选任务**,运行评测开始时统一
 校验,缺键/非法则快速失败。下表为两个 JSON 参数的默认值(即 K3 推荐口径):
 
 | 评测任务 | 数据来源 | 样本上限默认 | MaxTokens 默认 | 说明 |
@@ -298,6 +305,7 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 | OCRBench | HF `echo840/OCRBench`(首次经代理下载并缓存) | 空(全量 1000) | 16384 | 文本识别基准,单图短答 |
 | MMMU | HF `MMMU/MMMU_Pro` standard (10 options)(数 GB,首次下载慢) | 空(全量约 1.17 万) | 98304 | 多模态选择题,1~7 图/题;全量单轮数亿 token,请预留充足时长,快速验证时可用 `TASK_LIMIT_JSON` 截断 |
 | ToolCall | 仓库内 LFS `toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl`(全量 70 样本) | 空(全量) | 32768 | 即 README K3 表「Tool Call」(`kimi_toolcall`),评分 tool_calls 格式/合法性;**默认勾选** |
+| BEAM | 仓库内 LFS `beam/data/beam_1m_chats.jsonl.gz`(35 对话×20 题=700 题,另有 128k 变体) | 空(全量 700) | 65536 | 1M 长程记忆基准,独立两阶段脚本(生成+LLM 判分),**默认不勾选**;详见 8.4 |
 
 思考强度为**布尔多选**(`EFFORT_NONE` / `EFFORT_LOW` / `EFFORT_HIGH` /
 `EFFORT_MAX`,默认仅勾选 `max`):每个勾选的强度对每个勾选的评测任务
@@ -312,7 +320,12 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 (默认已填内网代理,可留空(空 = 直连);仅用于 LFS 拉取/HF 数据集首次
 下载,**依赖安装不走代理**;评测阶段自动剥离,模型请求全直连)、
 `HF_ENDPOINT`(可选镜像)、`TOOLCALL_DATASET`(kimi_toolcall
-数据集路径)、`CHIP`/`ENGINE`/`PD`(芯片平台/推理框架/PD 分离模式,仅
+数据集路径)、BEAM 组参数(`RUN_BEAM` 默认不勾选;`BEAM_DATA` 1m/128k;
+`BEAM_PLAIN_TEXT` 默认 true;`BEAM_CONCURRENCY` 8;`BEAM_TIMEOUT` 3600s;
+`BEAM_DRY_RUN` 冒烟;判分 `JUDGE_BASE_URL`/`JUDGE_API_KEY`/`JUDGE_MODEL`
+默认 kimi-k2.6/`JUDGE_TEMPERATURE` 默认 1.0(kimi 系判分模型须 1.0)/
+`JUDGE_CONCURRENCY` 10,判分端点留空=仅生成 answers)、
+`CHIP`/`ENGINE`/`PD`(芯片平台/推理框架/PD 分离模式,仅
 邮件展示,与功能验证流水线共用同一组参数定义)。
 
 ### 8.2 stage 一览
@@ -322,9 +335,9 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 | 打印评测参数 | 回显所有入参(含 BASE_URL 拼接结果) |
 | 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
 | API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
-| 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench"`,排除 run_kimivv_tests,**不会误杀并发运行中的功能验证进程**) → `git lfs pull`(经代理) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
-| 运行评测 | `source .venv/bin/activate` 后先校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败),再双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`,单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties` |
-| 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志) |
+| 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench\|beam_generate\|beam_judge"`,排除 run_kimivv_tests,**不会误杀并发运行中的功能验证进程**) → `git lfs pull`(经代理,含 kimi_toolcall 与 BEAM 数据) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
+| 运行评测 | 评测脚本经 ssh 上传到远程后由 `nohup` **后台执行**(MMMU 全量 ~50 小时,不能由单条长连接 ssh 承载),Jenkins 侧每 5 分钟用**短连接轮询** exit-code 标记并回显日志尾部,网络抖动只损失单次轮询;脚本内 `source .venv/bin/activate` → 校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败) → 双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`(beam 走脚本内两阶段分支),单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties`。任何退出路径(含 set -e 中断)都写 exit-code 标记,step 重试时按 pid 检测避免双跑 |
+| 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志、`bench_run_<N>.log/sh/rc`);**显式校验 bench_summary.properties 已包含**,缺失时打警告(邮件将不显示汇总) |
 | 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值 |
 | 清理旧构建 | 远程 `bench_builds/<tester>/` 只保留最近 20 个(独立命名空间,不触碰功能验证的 `builds/`) |
 
@@ -367,6 +380,15 @@ export KVB_EFFORT="max"
 export KVB_OUT_DIR="/tmp/kvv_bench_out"
 
 # 4. 执行
+./run_kimivv_bench.sh
+
+# 5. BEAM(1M) 示例(可选;判分端点留空则仅生成 answers)
+export KVB_BENCH="beam"
+export KVB_EFFORT="max"
+export KVB_BEAM_DATA="1m"
+export KVB_LIMIT="5"                       # 冒烟:仅前 5 题
+export KVB_JUDGE_BASE_URL="http://127.0.0.1:3001/v1"
+export KVB_JUDGE_API_KEY="EMPTY"
 ./run_kimivv_bench.sh
 ```
 
@@ -414,7 +436,49 @@ OCRBench/MMMU 首次运行会从 HuggingFace 下载数据集(需 `KVB_HTTP_PROXY
   tool_calls 的 JSON 合法性、schema 校验、幻觉工具、控制符泄漏等。
 - **HuggingFace 数据集**:首次运行经 `HTTP_PROXY` 下载并缓存在远程主机
   `~/.cache/huggingface`,之后不再依赖网络。
-- **BEAM(1M) 未接入**:长程记忆基准(35 段对话×20 探测题,单题上下文
-  约 1M token,生成+评审两阶段且需 judge 模型),全量约 7 亿输入 token,
-  与 CI 参数模型不匹配,暂不纳入;需要时按 `beam/README.md` 手动执行。
+- **BEAM(1M) 已接入(可选,默认关闭)**:长程记忆基准(35 段对话×20 探测题
+  =700 题,单题上下文可达 1M token),官方 K3/K3.1 供应商验证表的正式列。
+  与其他基准不同,BEAM 为上游 `beam/` 目录的独立两阶段脚本(不改动上游
+  代码):`beam_generate.py` 生成 answers(断点续跑)→ `beam_judge.py`
+  LLM-as-Judge 按 rubric 判分(断点续跑)→ `kvv_bench_runner.py
+  beam-summary` 产出与其他基准同构的 `summary.json`,经既有 aggregate
+  自动进入 `bench_summary.properties` 与邮件表格(行名 `beam/<effort>`)。
+  接入方式:勾选 `RUN_BEAM` 后,beam 与其他基准共用 (bench,effort) 组合
+  循环,limit/max_tokens 走既有 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`
+  的 `beam` 键(默认 null=700 全量 / 65536);thinking 语义与其他基准
+  完全同源(`get_thinking_extra_body`,effort 优先,透传 `--thinking-json`;
+  effort=none 时为 non-thinking 轮,与上游 CI 一致)。
+  - **产物**:`bench/beam/<effort>/answers_<mode>.jsonl`、
+    `scores_<mode>.jsonl`、`summary.json`(`<mode>`=plain|multiturn;
+    切换 `BEAM_PLAIN_TEXT` 时文件名不同,断点续跑互不干扰;两阶段脚本
+    均自动跳过已完成题目,中断后重跑即可续跑)。
+  - **前提**:被测端点须接受 ~1M token 输入(建议先 `BEAM_DRY_RUN` 或
+    `TASK_LIMIT_JSON.beam=1` 冒烟验证;上下文不足 1M 的部署可切
+    `BEAM_DATA=128k`);判分端点须独立于被测端点且 Jenkins 节点可直连
+    (beam 分支在生成前剥离全部代理变量,生成与判分均直连;判分模型为
+    kimi 系时 `JUDGE_TEMPERATURE` 须为 1.0)。
+  - **资源**:1M 全量约 7 亿输入 token、生成数小时,勾选后建议仅保留
+    一个思考强度(校验阶段多强度勾选时会打印 WARN);判分端点留空时
+    仅生成 answers(跳过判分与汇总,不出 accuracy 结果行);
+    `BEAM_DRY_RUN` 同样跳过判分与汇总。判分失败(或判分行数少于答案
+    行数)时该组合标记 FAILED,不影响其他组合继续执行。
+- **邮件"未生成评测汇总"的真正根因(build #5/#6 均中招)**:邮件 stage 解析
+  properties 的正则把行尾锚点写成 `\$`——Groovy 斜杠字符串中 `\$` 会**保留
+  反斜杠**,正则含义变成"匹配字面 '$' 字符",任何 key 都匹配不上 → 结果表恒为
+  "未生成评测汇总"。build #5 控制台日志证明:汇总文件已拉取到 workspace、
+  `fileExists`/`readFile` 均成功执行,症结**仅**在正则(行尾锚点须写裸 `$`,
+  与功能验证流水线 `Jenkinsfile:276` 的写法一致)。同批修复的连带问题:
+  environment 块 `BASE_URL_V1` 的 `replaceAll('/+\$','')` 同因永不生效(改为
+  `'/+$'`,尾斜杠/尾 /v1 剥离恢复工作);表格取值原用 GString 作 map key,
+  因 hashCode 与 String 不一致会查不到(改为 String 拼接);TreeSet 元素
+  补 `.toString()` 防 ClassCastException。
+- **长时评测的抗断线加固**:旧实现用单条 ssh 长连接承载全部评测,MMMU 全量
+  约 50 小时,网络闪断会杀死 Jenkins 侧步骤(catchError 降级为 UNSTABLE 后
+  流水线继续,拉取到的将是未完成快照)。现改为**远程 nohup 后台执行 +
+  短连接轮询**(见 8.2),断网只损失单次轮询、不再影响评测执行与拉取时机;
+  拉取 stage 显式校验汇总文件存在性,邮件缺行时提示查看附件
+  `bench_run_<N>.log`(后台执行的完整控制台输出)。手动 abort 构建会由
+  运行评测 stage 的 `post { aborted }` 钩子按 pidfile 递归终止远程进程树
+  (先 TERM 宽限 10 秒再 KILL 残留,仅覆盖本构建的 PID 及其子孙,不影响
+  其他构建),不会留下孤儿评测进程。
 - **AIME 2025**:`eval.py` 支持(`epochs=32`),K3 已不推荐,未纳入本流水线。

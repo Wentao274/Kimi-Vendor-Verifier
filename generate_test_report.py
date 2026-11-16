@@ -53,6 +53,9 @@ CLASS_LABELS = {
 # 若失败，对不含该能力的模型（如 kimi-k3）属预期（能力缺失）。
 # 报告层按此清单加徽标（用于区分 "K3.1 能力缺失" 与 "部署缺陷"）：
 # 套件行（聚合）标 "含K3.1功能"，明细用例行（个体）标 "K3.1功能"。
+# 被测模型即 K3.1 本身（模型名含 "k3.1"）时语义反转：K3.1 功能模块的失败
+# 不再属 "能力缺失" 预期——隐藏 "剔除后通过率" 行，徽标提示/标注说明/结论
+# 改为要求按功能实现或部署问题排查。
 # 上游若新增 new_model 模块，需同步扩充。
 K31_MODULE_PREFIXES = (
     "k3_features/test_dynamic_tools",
@@ -61,6 +64,11 @@ K31_MODULE_PREFIXES = (
     "k3_features/test_tokenization_groundtruth",
     "k3_features/test_tool_choice",
 )
+
+
+def _model_is_k31(model: str) -> bool:
+    """被测模型是否为 K3.1 系列（按模型名判断，如 kimi-k3.1 / Kimi-K3.1-xxx）。"""
+    return bool(re.search(r"k3\.1", model or "", re.IGNORECASE))
 
 
 @dataclass
@@ -135,6 +143,10 @@ _ZH_REGEX: list[tuple[str, str]] = [
      r"断言失败：期望 effort 报告为 '\1'，实际为 '\2'"),
     (r"^AssertionError: reasoning_effort should be ignored when thinking\.effort present: with_ignored=(\d+), max_only=(\d+).*$",
      r"断言失败：thinking.effort 存在时应忽略 reasoning_effort（with_ignored=\1，max_only=\2）"),
+    (r"^AssertionError: temperature=(0\.6|0\.0) should be accepted: Rejected\(400\): "
+     r"Error code: 400 - .*only 1 is allowed for this model in thinking mode.*$",
+     r"用例不适用（非部署问题）：Kimi 官方契约 thinking 模式仅接受 temperature=1.0，"
+     r"服务端拒绝 \1 属正确行为——上游 test_params.py 的 think_default 待修正"),
 ]
 
 _ZH_PARTIAL: list[tuple[str, str]] = [
@@ -175,14 +187,18 @@ def _is_k31_module(display: str) -> bool:
     return bool(display) and display.startswith(K31_MODULE_PREFIXES)
 
 
-def _k31_badge(is_k31: bool, *, suite: bool = False) -> str:
+def _k31_badge(is_k31: bool, *, suite: bool = False, model_is_k31: bool = False) -> str:
     if not is_k31:
         return ""
+    if model_is_k31:
+        tip = "被测模型即 K3.1，此处失败并非能力缺失，需按功能实现/部署问题排查"
+    else:
+        tip = "被测模型不含对应能力时，相关失败属预期（能力缺失）"
     if suite:
-        return ("<span class='k31' title='该套件含 K3.1 (new_model) 新增功能用例："
-                "被测模型不含对应能力时，相关失败属预期（能力缺失）'>含K3.1功能</span>")
-    return ("<span class='k31' title='该用例所属模块为 K3.1 (new_model) 功能模块："
-            "被测模型不含对应能力时，此类失败属预期（能力缺失）'>K3.1功能</span>")
+        return (f"<span class='k31' title='该套件含 K3.1 (new_model) 新增功能用例：{tip}'>"
+                "含K3.1功能</span>")
+    return (f"<span class='k31' title='该用例所属模块为 K3.1 (new_model) 功能模块：{tip}'>"
+            "K3.1功能</span>")
 
 
 def _params_mode(junit_file: str) -> str | None:
@@ -295,6 +311,7 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
                      if _is_k31_module(cs.name))
     k31_denom = total - k31_total
     k31_rate = (passed - k31_passed) / k31_denom * 100 if k31_denom > 0 else 0.0
+    model_is_k31 = _model_is_k31(model)
 
     ts = timestamp or datetime.now().strftime("%Y%m%d%H%M%S")
     run_at = (f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
@@ -345,22 +362,34 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
       f"<tr><td>失败（K3.1 范围内）</td><td>{len(k31_fails)}</td></tr>"
       + (f"<tr><td>通过率（剔除含K3.1功能模块用例后）</td>"
          f"<td>{k31_rate:.2f}%（{passed - k31_passed}/{k31_denom}）</td></tr>"
-         if k31_total else "")
+         if k31_total and not model_is_k31 else "")
       + "</table>")
     if k31_total:
         k31_skipped = k31_total - k31_passed - len(k31_fails)
-        p(f"<p class='note'>计算算法：通过率 = 总通过 / 总用例（跳过、错误计为未通过）。"
-          f"通过率（剔除含K3.1功能模块用例后）=（总通过 {passed} − K3.1 范围通过"
-          f" {k31_passed}）/（总用例 {total} − K3.1 范围用例 {k31_total}）：分子与分母"
-          f"同时整块剔除 {len(K31_MODULE_PREFIXES)} 个 (new_model) 模块的全部用例——"
-          f"K3.1 范围 {k31_total} 例 = 通过 {k31_passed} + 失败 {len(k31_fails)} + "
-          f"跳过 {k31_skipped}（跳过既不计通过也不计失败）；K3.1 范围内通过的用例"
-          f"不再计入分子。</p>")
-    p("<p class='note'>标注说明：套件行标注 <span class='k31'>含K3.1功能</span> 表示该套件"
-      "含上游 (new_model) K3.1 新增功能用例，并非全部用例均为 K3.1 专属；明细用例行标注"
-      " <span class='k31'>K3.1功能</span> 表示该用例所属模块为 K3.1 功能模块。"
-      "对不含该能力的模型（如 kimi-k3），K3.1 专属用例失败属预期（能力缺失）；"
-      "未标注的失败才需要按部署/服务问题排查。</p>")
+        if model_is_k31:
+            # 被测模型即 K3.1：不存在"剔除 K3.1 用例"的口径，只解释基础通过率与 K3.1 范围计数
+            p(f"<p class='note'>计算算法：通过率 = 总通过 / 总用例（跳过、错误计为未通过）。"
+              f"K3.1 范围 {k31_total} 例 = 通过 {k31_passed} + 失败 {len(k31_fails)} + "
+              f"跳过 {k31_skipped}（跳过既不计通过也不计失败）。</p>")
+        else:
+            p(f"<p class='note'>计算算法：通过率 = 总通过 / 总用例（跳过、错误计为未通过）。"
+              f"通过率（剔除含K3.1功能模块用例后）=（总通过 {passed} − K3.1 范围通过"
+              f" {k31_passed}）/（总用例 {total} − K3.1 范围用例 {k31_total}）：分子与分母"
+              f"同时整块剔除 {len(K31_MODULE_PREFIXES)} 个 (new_model) 模块的全部用例——"
+              f"K3.1 范围 {k31_total} 例 = 通过 {k31_passed} + 失败 {len(k31_fails)} + "
+              f"跳过 {k31_skipped}（跳过既不计通过也不计失败）；K3.1 范围内通过的用例"
+              f"不再计入分子。</p>")
+    if model_is_k31:
+        p("<p class='note'>标注说明：套件行标注 <span class='k31'>含K3.1功能</span> 表示该套件"
+          "含上游 (new_model) K3.1 新增功能用例；明细用例行标注 <span class='k31'>K3.1功能</span> "
+          "表示该用例所属模块为 K3.1 功能模块。被测模型即 K3.1：K3.1 功能模块的失败并非"
+          "能力缺失，需按功能实现/部署问题排查。</p>")
+    else:
+        p("<p class='note'>标注说明：套件行标注 <span class='k31'>含K3.1功能</span> 表示该套件"
+          "含上游 (new_model) K3.1 新增功能用例，并非全部用例均为 K3.1 专属；明细用例行标注"
+          " <span class='k31'>K3.1功能</span> 表示该用例所属模块为 K3.1 功能模块。"
+          "对不含该能力的模型（如 kimi-k3），K3.1 专属用例失败属预期（能力缺失）；"
+          "未标注的失败才需要按部署/服务问题排查。</p>")
 
     # ---- 二、按套件统计 ----
     p("<h2>二、按套件统计</h2>")
@@ -386,7 +415,7 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
           "<th>跳过</th><th>错误</th><th>累计用时*</th></tr>")
         for cs in sorted(merged.values(),
                          key=lambda c: (c.name not in params_keys, c.name)):
-            p(f"<tr><td>{escape(cs.name)}{_k31_badge(_is_k31_module(cs.name), suite=True)}</td>" + td_num(cs.total) + td_num(cs.passed)
+            p(f"<tr><td>{escape(cs.name)}{_k31_badge(_is_k31_module(cs.name), suite=True, model_is_k31=model_is_k31)}</td>" + td_num(cs.total) + td_num(cs.passed)
               + td_num(cs.failed) + td_num(cs.skipped) + td_num(cs.errors)
               + f"<td>{fmt_time(cs.time)}</td></tr>")
         p("</table>")
@@ -404,7 +433,7 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
                 label = "失败" if o.kind == "failure" else "错误"
                 full = f"{o.classname}::{o.name}"
                 p(f"<tr class='bad'><td>{label}</td>"
-                  f"<td>{escape(full)}{_k31_badge(_is_k31_module(o.classname))}</td>"
+                  f"<td>{escape(full)}{_k31_badge(_is_k31_module(o.classname), model_is_k31=model_is_k31)}</td>"
                   f"<td>{escape(_zh(o.message))}</td></tr>")
             p("</table>")
         if skips:
@@ -418,7 +447,7 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
                 reasons = {o.message or "—" for o in items}
                 reason = " / ".join(sorted(reasons))
                 p(f"<tr><td>{escape(f'{cls_name}::{base}')}"
-                  f"{_k31_badge(_is_k31_module(cls_name))}</td>"
+                  f"{_k31_badge(_is_k31_module(cls_name), model_is_k31=model_is_k31)}</td>"
                   f"<td>{len(items)}</td><td>{escape(_zh(reason))}</td></tr>")
             p("</table></details>")
     else:
@@ -465,11 +494,17 @@ def build_report(runs: list[RunResult], tool_json: dict[str, Any], model: str,
     else:
         p("<li>无失败用例。</li>")
     if k31_fails:
-        p(f"<li>其中 <b>{len(k31_fails)}</b> 项失败位于含 K3.1 (new_model) 新增功能的套件"
-          f"（{'、'.join(sorted({o.classname for o in k31_fails}))}）。"
-          "此类套件并非全部用例均为 K3.1 专属：源于 K3.1 专属能力的失败"
-          "（被测模型不含该能力）属预期（能力缺失），不计入部署缺陷；"
-          "套件内其余用例失败仍需按部署问题排查。</li>")
+        suites = "、".join(sorted({o.classname for o in k31_fails}))
+        if model_is_k31:
+            p(f"<li>其中 <b>{len(k31_fails)}</b> 项失败位于 K3.1 (new_model) 功能套件"
+              f"（{suites}）。被测模型即 K3.1，该类失败不属能力缺失，"
+              "需按模型功能实现或部署/服务问题排查。</li>")
+        else:
+            p(f"<li>其中 <b>{len(k31_fails)}</b> 项失败位于含 K3.1 (new_model) 新增功能的套件"
+              f"（{suites}）。"
+              "此类套件并非全部用例均为 K3.1 专属：源于 K3.1 专属能力的失败"
+              "（被测模型不含该能力）属预期（能力缺失），不计入部署缺陷；"
+              "套件内其余用例失败仍需按部署问题排查。</li>")
     if errors:
         p(f"<li>收集错误 <b>{errors}</b> 项（请检查对应 testdata 文件是否损坏或未拉取 LFS）。</li>")
     if skipped:

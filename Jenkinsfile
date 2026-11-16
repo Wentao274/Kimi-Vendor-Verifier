@@ -46,7 +46,7 @@ pipeline {
         //   先剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
         // 例： http://h:3000 | http://h:3000/ | http://h:3000/v1 | http://h:3000/v1/
         //     都得到 http://h:3000/v1
-        BASE_URL_V1 = "${params.BASE_URL.replaceAll('/+\$', '').replaceAll('/?v1\$', '')}/v1"
+        BASE_URL_V1 = "${params.BASE_URL.replaceAll('/+$', '').replaceAll('/?v1$', '')}/v1"
     }
 
     stages {

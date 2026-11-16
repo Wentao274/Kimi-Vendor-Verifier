@@ -27,6 +27,17 @@ set -euo pipefail
 #   KVB_HTTP_PROXY    代理地址（仅数据集下载阶段生效；评测阶段由 runner 剥离代理；空 = 直连）
 #   KVB_HF_ENDPOINT   HuggingFace 镜像端点（可选，直连不可达时可设镜像）
 #   KVB_OUT_DIR       评测结果根目录（必填；组合目录 <KVB_OUT_DIR>/<bench>/<effort>/）
+#   --- 以下仅 KVB_BENCH=beam（BEAM 1M 长程记忆两阶段评测）时使用 ---
+#   KVB_BEAM_DATA         数据规格：1m（35 对话×20 题=700 题）| 128k（128k 对话变体）（默认 1m）
+#   KVB_BEAM_PLAIN_TEXT   true=plain-text 单消息拼接（与上游 CI 默认一致）| false=多轮 messages（默认 true）
+#   KVB_BEAM_CONCURRENCY  生成阶段并发请求数（默认 8；1M prompt 较重，SGLang 自部署勿照抄官方 50）
+#   KVB_BEAM_TIMEOUT      生成阶段单请求超时秒数（默认 3600；1M prompt + 长思考生成较慢）
+#   KVB_BEAM_DRY_RUN      true=冒烟：仅构建 prompt 不发请求，跳过判分与汇总（默认 false）
+#   KVB_JUDGE_BASE_URL    判分端点（带 /v1；空=仅生成答案跳过判分；须与被测端点独立、可直连）
+#   KVB_JUDGE_API_KEY     判分 API Key（KVB_JUDGE_BASE_URL 非空时必填）
+#   KVB_JUDGE_MODEL       判分模型（默认 kimi-k2.6，与上游 CI 一致）
+#   KVB_JUDGE_TEMPERATURE 判分采样温度（默认 1.0；kimi 系判分模型须锁定 1.0，其他模型可 0.3）
+#   KVB_JUDGE_CONCURRENCY 判分并发请求数（默认 10，与上游 CI 一致）
 # =======================================================
 
 cd "$(dirname "$0")"
@@ -64,11 +75,181 @@ KVB_STREAM="${KVB_STREAM:-true}"
 KVB_DATASET="${KVB_DATASET:-toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl}"
 KVB_HTTP_PROXY="${KVB_HTTP_PROXY:-}"
 KVB_HF_ENDPOINT="${KVB_HF_ENDPOINT:-}"
+KVB_BEAM_DATA="${KVB_BEAM_DATA:-1m}"
+KVB_BEAM_PLAIN_TEXT="${KVB_BEAM_PLAIN_TEXT:-true}"
+KVB_BEAM_CONCURRENCY="${KVB_BEAM_CONCURRENCY:-8}"
+KVB_BEAM_TIMEOUT="${KVB_BEAM_TIMEOUT:-3600}"
+KVB_BEAM_DRY_RUN="${KVB_BEAM_DRY_RUN:-false}"
+KVB_JUDGE_BASE_URL="${KVB_JUDGE_BASE_URL:-}"
+KVB_JUDGE_API_KEY="${KVB_JUDGE_API_KEY:-}"
+KVB_JUDGE_MODEL="${KVB_JUDGE_MODEL:-kimi-k2.6}"
+KVB_JUDGE_TEMPERATURE="${KVB_JUDGE_TEMPERATURE:-1.0}"
+KVB_JUDGE_CONCURRENCY="${KVB_JUDGE_CONCURRENCY:-10}"
 
 EFFORT_LABEL="${KVB_EFFORT:-legacy}"
 RUN_DIR="${KVB_OUT_DIR}/${KVB_BENCH}/${EFFORT_LABEL}"
 LOG_FILE="${RUN_DIR}/bench_${KVB_BENCH}_${EFFORT_LABEL}.log"
 mkdir -p "${RUN_DIR}"
+
+# ---------- BEAM(1M) 两阶段评测分支 ----------
+# KVB_BENCH=beam 时不走 inspect-ai：先 beam_generate.py 生成 answers（断点续跑），
+# 再 beam_judge.py LLM-as-Judge 判分（断点续跑），最后 kvv_bench_runner.py
+# beam-summary 产出与其他基准同构的 summary.json（汇总与邮件自动包含）。
+# 分支内所有路径均显式 exit，不会落入下方通用 inspect-ai 流程。
+if [ "${KVB_BENCH}" = "beam" ]; then
+    case "${KVB_BEAM_DATA}" in
+        1m|128k) ;;
+        *) echo "ERROR: KVB_BEAM_DATA 须为 1m 或 128k（当前: ${KVB_BEAM_DATA}）" >&2; exit 1 ;;
+    esac
+    CHATS_ARG="data/beam_${KVB_BEAM_DATA}_chats.jsonl.gz"
+    QUESTIONS_ARG="data/beam_${KVB_BEAM_DATA}_questions.jsonl"
+    if [ ! -f "beam/${CHATS_ARG}" ] || [ ! -f "beam/${QUESTIONS_ARG}" ]; then
+        echo "ERROR: BEAM 数据缺失: beam/${CHATS_ARG} / beam/${QUESTIONS_ARG}（先 git lfs pull）" >&2
+        exit 1
+    fi
+
+    # BEAM 数据随仓库 LFS 分发，无下载阶段；模型/判分请求必须直连，
+    # 与 kvv_bench_runner.py 评测阶段的做法一致，直接剥离所有代理变量
+    unset https_proxy http_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY 2>/dev/null || true
+
+    MODE="multiturn"
+    if [ "${KVB_BEAM_PLAIN_TEXT}" = "true" ]; then
+        MODE="plain"
+    fi
+    ANSWERS_FILE="${RUN_DIR}/answers_${MODE}.jsonl"
+    SCORES_FILE="${RUN_DIR}/scores_${MODE}.jsonl"
+
+    # thinking extra_body 与 kvv_bench_runner run 完全同源（effort 优先 K3，
+    # KVB_EFFORT 为空时回退 legacy KVB_THINKING），透传给 beam_generate
+    THINKING_JSON="$(uv run --no-sync python -c '
+import json, sys
+from eval import get_thinking_extra_body
+print(json.dumps(get_thinking_extra_body(sys.argv[2] == "true", sys.argv[3], sys.argv[1] or None)))
+' "${KVB_EFFORT}" "${KVB_THINKING}" "${KVB_THINK_MODE}")" || {
+        echo "ERROR: thinking extra_body 计算失败" >&2
+        exit 1
+    }
+
+    echo "=== Kimi Vendor Verifier - BEAM (${KVB_BEAM_DATA}) ===" | tee -a "${LOG_FILE}"
+    echo "Bench     : beam (effort=${EFFORT_LABEL}, prompt-mode=${MODE}, dry-run=${KVB_BEAM_DRY_RUN})" | tee -a "${LOG_FILE}"
+    echo "Base URL  : ${KIMI_BASE_URL}" | tee -a "${LOG_FILE}"
+    echo "Model     : ${MODEL_NAME}" | tee -a "${LOG_FILE}"
+    echo "Data      : ${CHATS_ARG} + ${QUESTIONS_ARG}" | tee -a "${LOG_FILE}"
+    echo "Limit     : ${KVB_LIMIT:-FULL}" | tee -a "${LOG_FILE}"
+    echo "MaxTokens : ${KVB_MAX_TOKENS} | Conc: ${KVB_BEAM_CONCURRENCY} | Timeout: ${KVB_BEAM_TIMEOUT}s | Temp: ${KVB_TEMPERATURE} / TopP: ${KVB_TOP_P}" | tee -a "${LOG_FILE}"
+    echo "Thinking  : ${THINKING_JSON}" | tee -a "${LOG_FILE}"
+    echo "Judge     : ${KVB_JUDGE_BASE_URL:-（未配置，仅生成答案）} | model=${KVB_JUDGE_MODEL} | temp=${KVB_JUDGE_TEMPERATURE} | conc=${KVB_JUDGE_CONCURRENCY}" | tee -a "${LOG_FILE}"
+    echo "RunDir    : ${RUN_DIR}" | tee -a "${LOG_FILE}"
+    echo "=============================================" | tee -a "${LOG_FILE}"
+
+    GEN_ARGS=(
+        --model "${MODEL_NAME}"
+        --base-url "${KIMI_BASE_URL}"
+        --api-key "${KIMI_API_KEY}"
+        --chats-file "${CHATS_ARG}"
+        --questions-file "${QUESTIONS_ARG}"
+        --concurrency "${KVB_BEAM_CONCURRENCY}"
+        --timeout "${KVB_BEAM_TIMEOUT}"
+        --max-tokens "${KVB_MAX_TOKENS}"
+        --temperature "${KVB_TEMPERATURE}"
+        --top-p "${KVB_TOP_P}"
+        --output "${ANSWERS_FILE}"
+    )
+    if [ -n "${KVB_LIMIT}" ]; then
+        GEN_ARGS+=(--limit "${KVB_LIMIT}")
+    fi
+    if [ "${KVB_BEAM_PLAIN_TEXT}" = "true" ]; then
+        GEN_ARGS+=(--plain-text)
+    fi
+    if [ -n "${THINKING_JSON}" ] && [ "${THINKING_JSON}" != "{}" ]; then
+        GEN_ARGS+=(--thinking-json "${THINKING_JSON}")
+    fi
+    if [ "${KVB_BEAM_DRY_RUN}" = "true" ]; then
+        GEN_ARGS+=(--dry-run)
+    fi
+
+    GEN_START="$(date +%s)"
+    set +e
+    ( cd beam && uv run --no-sync python beam_generate.py "${GEN_ARGS[@]}" ) 2>&1 | tee -a "${LOG_FILE}"
+    GEN_RC="${PIPESTATUS[0]}"
+    set -e
+    GEN_DUR="$(( $(date +%s) - GEN_START ))"
+
+    if [ "${KVB_BEAM_DRY_RUN}" = "true" ]; then
+        echo "Result: BEAM DRY-RUN DONE（未发送请求，跳过判分与汇总，beam/${EFFORT_LABEL}）" | tee -a "${LOG_FILE}"
+        exit 0
+    fi
+    if [ "${GEN_RC}" -ne 0 ]; then
+        echo "Result: BENCH RUN FAILED (generate exit ${GEN_RC}, beam/${EFFORT_LABEL})" | tee -a "${LOG_FILE}"
+        exit "${GEN_RC}"
+    fi
+    if [ ! -s "${ANSWERS_FILE}" ]; then
+        echo "Result: BENCH RUN FAILED (answers 为空: ${ANSWERS_FILE}, beam/${EFFORT_LABEL})" | tee -a "${LOG_FILE}"
+        exit 1
+    fi
+
+    if [ -z "${KVB_JUDGE_BASE_URL}" ]; then
+        echo "WARN: KVB_JUDGE_BASE_URL 未配置，跳过判分与汇总；answers 已生成: ${ANSWERS_FILE}" | tee -a "${LOG_FILE}"
+        echo "Result: BENCH RUN PASSED (generate-only, beam/${EFFORT_LABEL})" | tee -a "${LOG_FILE}"
+        exit 0
+    fi
+    if [ -z "${KVB_JUDGE_API_KEY}" ]; then
+        echo "ERROR: 已配置 KVB_JUDGE_BASE_URL 但缺少 KVB_JUDGE_API_KEY (beam/${EFFORT_LABEL})" | tee -a "${LOG_FILE}" >&2
+        exit 1
+    fi
+
+    JUDGE_ARGS=(
+        --answers "${ANSWERS_FILE}"
+        --output "${SCORES_FILE}"
+        --judge-model "${KVB_JUDGE_MODEL}"
+        --judge-base-url "${KVB_JUDGE_BASE_URL}"
+        --judge-api-key "${KVB_JUDGE_API_KEY}"
+        --judge-temperature "${KVB_JUDGE_TEMPERATURE}"
+        --concurrency "${KVB_JUDGE_CONCURRENCY}"
+    )
+    JUDGE_START="$(date +%s)"
+    set +e
+    ( cd beam && uv run --no-sync python beam_judge.py "${JUDGE_ARGS[@]}" ) 2>&1 | tee -a "${LOG_FILE}"
+    JUDGE_RC="${PIPESTATUS[0]}"
+    set -e
+    JUDGE_DUR="$(( $(date +%s) - JUDGE_START ))"
+    if [ "${JUDGE_RC}" -ne 0 ] || [ ! -s "${SCORES_FILE}" ]; then
+        echo "Result: BENCH RUN FAILED (judge exit ${JUDGE_RC}, beam/${EFFORT_LABEL})" | tee -a "${LOG_FILE}"
+        exit 1
+    fi
+
+    SUM_ARGS=(
+        --answers "${ANSWERS_FILE}"
+        --scores "${SCORES_FILE}"
+        --out-dir "${RUN_DIR}"
+        --effort "${EFFORT_LABEL}"
+        --model "${MODEL_NAME}"
+        --think-mode "${KVB_THINK_MODE}"
+        --beam-data "${KVB_BEAM_DATA}"
+        --temperature "${KVB_TEMPERATURE}"
+        --max-tokens "${KVB_MAX_TOKENS}"
+        --gen-duration "${GEN_DUR}"
+        --judge-duration "${JUDGE_DUR}"
+    )
+    if [ "${MODE}" = "plain" ]; then
+        SUM_ARGS+=(--plain-text)
+    fi
+    if [ -n "${KVB_LIMIT}" ]; then
+        SUM_ARGS+=(--limit "${KVB_LIMIT}")
+    fi
+    set +e
+    uv run --no-sync python kvv_bench_runner.py beam-summary "${SUM_ARGS[@]}" 2>&1 | tee -a "${LOG_FILE}"
+    SUM_RC="${PIPESTATUS[0]}"
+    set -e
+    if [ "${SUM_RC}" -ne 0 ]; then
+        echo "Result: BENCH RUN FAILED (beam-summary exit ${SUM_RC}, beam/${EFFORT_LABEL})" | tee -a "${LOG_FILE}"
+        exit "${SUM_RC}"
+    fi
+    echo "Result: BENCH RUN PASSED (beam/${EFFORT_LABEL})" | tee -a "${LOG_FILE}"
+    exit 0
+fi
+
+# ---------- 通用 inspect-ai 评测流程（ocrbench / mmmu / kimi_toolcall） ----------
 
 # 代理仅用于 HuggingFace 数据集下载阶段(进程级 export,覆盖 kvv_bench_runner.py
 # 的数据集加载;已缓存的数据集不会重复下载)。数据集就绪后 kvv_bench_runner.py

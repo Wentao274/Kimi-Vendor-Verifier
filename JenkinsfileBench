@@ -23,6 +23,18 @@ pipeline {
         booleanParam(name: 'RUN_TOOLCALL', defaultValue: true, description: '是否评测 Tool Call（kimi_toolcall，README K3 推荐表任务之一，全量 70 样本，数据集在仓库 LFS 内，经 git lfs pull 自动同步）')
         string(name: 'TOOLCALL_DATASET', defaultValue: 'toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl', description: 'kimi_toolcall 数据集路径（仓库内 LFS 文件）')
 
+        booleanParam(name: 'RUN_BEAM', defaultValue: false, description: '是否评测 BEAM（Beyond a Million Tokens，1M 长程记忆基准，独立两阶段脚本：生成+LLM 判分；数据在仓库 LFS 内；1M 全量 700 题、单轮数小时，建议勾选后仅保留一个思考强度；需被测端点支持 ~1M token 上下文）')
+        choice(name: 'BEAM_DATA', choices: ['1m', '128k'], description: 'BEAM 数据规格（1m=35 段对话×20 题=700 题，单题上下文可达 1M；128k=128k token 对话变体，用于上下文窗口不足 1M 的部署）')
+        booleanParam(name: 'BEAM_PLAIN_TEXT', defaultValue: true, description: 'BEAM 历史渲染模式（true=plain-text 单消息拼接，与上游 CI 默认一致；false=保留多轮 messages）')
+        string(name: 'BEAM_CONCURRENCY', defaultValue: '8', description: 'BEAM 生成阶段并发请求数（1M prompt 较重，SGLang 自部署建议 4~8）')
+        string(name: 'BEAM_TIMEOUT', defaultValue: '3600', description: 'BEAM 生成阶段单请求超时秒数（1M prompt + 长思考生成较慢，默认 3600）')
+        booleanParam(name: 'BEAM_DRY_RUN', defaultValue: false, description: 'BEAM 冒烟模式（仅构建 prompt 不发请求，用于验证数据与上下文预算配置；自动跳过判分与汇总，不出结果行）')
+        string(name: 'JUDGE_BASE_URL', defaultValue: '', description: 'BEAM 判分端点根地址（带 /v1；空=仅生成答案跳过判分与汇总；判分走 LLM-as-Judge，须与被测端点独立、Jenkins 节点可直连）')
+        password(name: 'JUDGE_API_KEY', defaultValue: '', description: 'BEAM 判分端点 API Key（JUDGE_BASE_URL 非空时必填）')
+        string(name: 'JUDGE_MODEL', defaultValue: 'kimi-k2.6', description: 'BEAM 判分模型（上游 CI 默认 kimi-k2.6；kimi 系判分模型须配合 JUDGE_TEMPERATURE=1.0）')
+        string(name: 'JUDGE_TEMPERATURE', defaultValue: '1.0', description: '判分模型采样温度（kimi 系判分模型锁定 1.0；其他模型可用 0.3）')
+        string(name: 'JUDGE_CONCURRENCY', defaultValue: '10', description: '判分并发请求数（默认 10，与上游 CI 一致）')
+
         choice(name: 'THINK_MODE', choices: ['kimi', 'opensource'], description: 'thinking 参数格式（kimi=官方 API 格式；opensource=vLLM/SGLang 等开源部署格式，默认 kimi）')
 
         // 思考强度：多选组合，每个勾选的强度都会对每个勾选的评测任务各跑一轮
@@ -33,8 +45,8 @@ pipeline {
 
         // 按任务配置（JSON，与 evalscope-test 流水线的 TASK_MAX_TOKENS_JSON 风格一致）：
         // 每个维度一个 JSON 参数，键 = 评测任务名，须覆盖所有勾选任务，缺失/不合法则运行评测开始时校验失败
-        text(name: 'TASK_LIMIT_JSON', defaultValue: '{"ocrbench": null, "mmmu": null, "kimi_toolcall": null}', description: '按任务指定样本上限的 JSON。键=ocrbench/mmmu/kimi_toolcall，值=null（全量）或正整数；须覆盖所有勾选任务，缺失或不合法则校验失败。全量口径：OCRBench 1000 / MMMU 约 1.17 万（单轮数亿 token，请预留充足时长）/ kimi_toolcall 70。快速验证示例：{"ocrbench": 200, "mmmu": 100, "kimi_toolcall": 70}')
-        text(name: 'TASK_MAX_TOKENS_JSON', defaultValue: '{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768}', description: '按任务指定单次响应最大 tokens 的 JSON（默认 = README「Recommended Benchmark Parameters (K3)」：OCRBench 16384 / MMMU 98304 / kimi_toolcall 32768）。键=评测任务名，值=正整数；须覆盖所有勾选任务，缺失或不合法则校验失败')
+        text(name: 'TASK_LIMIT_JSON', defaultValue: '{"ocrbench": null, "mmmu": null, "kimi_toolcall": null, "beam": null}', description: '按任务指定样本上限的 JSON。键=ocrbench/mmmu/kimi_toolcall/beam，值=null（全量）或正整数；须覆盖所有勾选任务，缺失或不合法则校验失败。全量口径：OCRBench 1000 / MMMU 约 1.17 万（单轮数亿 token，请预留充足时长）/ kimi_toolcall 70 / BEAM 700。快速验证示例：{"ocrbench": 200, "mmmu": 100, "kimi_toolcall": 70, "beam": 5}')
+        text(name: 'TASK_MAX_TOKENS_JSON', defaultValue: '{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768, "beam": 65536}', description: '按任务指定单次响应最大 tokens 的 JSON（默认 = README「Recommended Benchmark Parameters (K3)」：OCRBench 16384 / MMMU 98304 / kimi_toolcall 32768；beam 65536 = 上游 BEAM 脚本默认）。键=评测任务名，值=正整数；须覆盖所有勾选任务，缺失或不合法则校验失败')
 
         // 以下默认值 = README「Recommended Benchmark Parameters (K3)」
         string(name: 'TEMPERATURE', defaultValue: '1.0', description: '采样温度（README K3 推荐值 1.0；non-thinking 轮可改 0.6）')
@@ -64,7 +76,7 @@ pipeline {
         // 用户在 BASE_URL 填根地址（可不带或带 /v1，可带或不带尾斜杠）。
         // 这里 idempotent 拼接出唯一的 OpenAI 兼容端点：
         //   先剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
-        BASE_URL_V1 = "${params.BASE_URL.replaceAll('/+\$', '').replaceAll('/?v1\$', '')}/v1"
+        BASE_URL_V1 = "${params.BASE_URL.replaceAll('/+$', '').replaceAll('/?v1$', '')}/v1"
     }
 
     stages {
@@ -78,11 +90,19 @@ pipeline {
                     println("芯片平台:     ${params.CHIP}")
                     println("推理框架:     ${params.ENGINE}")
                     println("PD分离模式:   ${params.PD}")
-                    println("评测任务:     ocrbench=${params.RUN_OCRBENCH} mmmu=${params.RUN_MMMU} toolcall=${params.RUN_TOOLCALL}")
+                    println("评测任务:     ocrbench=${params.RUN_OCRBENCH} mmmu=${params.RUN_MMMU} toolcall=${params.RUN_TOOLCALL} beam=${params.RUN_BEAM}")
                     println("模型名称:     ${params.MODEL}")
                     println("BASE_URL:     ${params.BASE_URL}  (→ ${env.BASE_URL_V1})")
                     println("ThinkMode:    ${params.THINK_MODE}")
                     println("思考强度:     none=${params.EFFORT_NONE} low=${params.EFFORT_LOW} high=${params.EFFORT_HIGH} max=${params.EFFORT_MAX}")
+                    if (params.RUN_BEAM) {
+                        println("BEAM:         data=${params.BEAM_DATA} plain_text=${params.BEAM_PLAIN_TEXT} dry_run=${params.BEAM_DRY_RUN} conc=${params.BEAM_CONCURRENCY} timeout=${params.BEAM_TIMEOUT}s")
+                        if (params.JUDGE_BASE_URL?.trim()) {
+                            println("BEAM Judge:   ${params.JUDGE_BASE_URL} (model=${params.JUDGE_MODEL}, temp=${params.JUDGE_TEMPERATURE}, conc=${params.JUDGE_CONCURRENCY})")
+                        } else {
+                            println("BEAM Judge:   （未配置，仅生成答案，跳过判分与汇总）")
+                        }
+                    }
                     println("样本上限JSON: ${params.TASK_LIMIT_JSON}")
                     println("MaxTokens JSON: ${params.TASK_MAX_TOKENS_JSON}")
                     println("温度/topP:    ${params.TEMPERATURE} / ${params.TOP_P}")
@@ -107,8 +127,18 @@ pipeline {
                     if (params.RUN_OCRBENCH) { benches.add('ocrbench') }
                     if (params.RUN_MMMU) { benches.add('mmmu') }
                     if (params.RUN_TOOLCALL) { benches.add('kimi_toolcall') }
+                    if (params.RUN_BEAM) { benches.add('beam') }
                     if (!benches) {
-                        error("请至少勾选一个评测任务(OCRBench/MMMU/ToolCall)")
+                        error("请至少勾选一个评测任务(OCRBench/MMMU/ToolCall/BEAM)")
+                    }
+                    def judgeApiKey = params.JUDGE_API_KEY?.toString()?.trim()
+                    if (params.RUN_BEAM) {
+                        if (params.JUDGE_BASE_URL?.trim() && !judgeApiKey) {
+                            error("RUN_BEAM 已配置判分端点 JUDGE_BASE_URL，必须同时填写 JUDGE_API_KEY（或清空 JUDGE_BASE_URL 仅生成答案）")
+                        }
+                        if (!params.JUDGE_BASE_URL?.trim()) {
+                            println("WARN: RUN_BEAM 未配置 JUDGE_BASE_URL，本次仅生成 answers（跳过判分与汇总，不出 accuracy 结果行）")
+                        }
                     }
                     def efforts = []
                     if (params.EFFORT_NONE) { efforts.add('none') }
@@ -136,6 +166,9 @@ pipeline {
                     }
                     println("本次将执行 ${combos.size()} 个评测组合:")
                     combos.each { println("  - ${it}") }
+                    if (params.RUN_BEAM && efforts.size() > 1) {
+                        println("WARN: BEAM 已勾选且选择了 ${efforts.size()} 个思考强度，BEAM 每个强度各跑一轮全量（1M 单轮数小时），请确认时长预算")
+                    }
                 }
             }
         }
@@ -199,20 +232,20 @@ echo "工作目录: \$(pwd)"
 echo "=== 清理残留评测进程 ==="
 # 正向模式只匹配基准评测自身进程;排除 run_kimivv_tests 做双保险,
 # 即使基准评测触发时功能验证流水线正在运行,也不会误杀其进程
-RESIDUAL=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench" 2>/dev/null | grep -vE "jenkins|durable|@tmp|run_kimivv_tests" || true)
+RESIDUAL=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench|beam_generate|beam_judge" 2>/dev/null | grep -vE "jenkins|durable|@tmp|run_kimivv_tests" || true)
 if [ -n "\${RESIDUAL}" ]; then
     echo "发现残留进程:"
     echo "\${RESIDUAL}"
     echo "发送 SIGTERM..."
     echo "\${RESIDUAL}" | awk '{print \$1}' | xargs -r kill -TERM 2>/dev/null || true
     sleep 3
-    REMAINING=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench" 2>/dev/null | grep -vE "jenkins|durable|@tmp|run_kimivv_tests" || true)
+    REMAINING=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench|beam_generate|beam_judge" 2>/dev/null | grep -vE "jenkins|durable|@tmp|run_kimivv_tests" || true)
     if [ -n "\${REMAINING}" ]; then
         echo "残留进程未响应 SIGTERM,发送 SIGKILL..."
         echo "\${REMAINING}" | awk '{print \$1}' | xargs -r kill -KILL 2>/dev/null || true
         sleep 1
     fi
-    FINAL=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench" 2>/dev/null | grep -vE "jenkins|durable|@tmp|run_kimivv_tests" || true)
+    FINAL=\$(pgrep -af "kvv_bench_runner|run_kimivv_bench|beam_generate|beam_judge" 2>/dev/null | grep -vE "jenkins|durable|@tmp|run_kimivv_tests" || true)
     if [ -n "\${FINAL}" ]; then
         echo "WARN: 以下残留进程仍存在,需人工介入:"
         echo "\${FINAL}"
@@ -237,7 +270,7 @@ fi
 if command -v git-lfs >/dev/null 2>&1; then
     git lfs pull
 else
-    echo "警告: git-lfs 不可用，OCRBench/MMMU 为 HF 在线数据集不受影响，kimi_toolcall 数据集可能缺失"
+    echo "警告: git-lfs 不可用，OCRBench/MMMU 为 HF 在线数据集不受影响，kimi_toolcall 与 BEAM 数据集可能缺失"
 fi
 unset https_proxy
 unset http_proxy
@@ -267,11 +300,23 @@ ENDSSH"""
                 script {
                     def apiKey = params.API_KEY?.toString()?.trim()
                     if (!apiKey) { apiKey = 'EMPTY' }
+                    def judgeApiKey = params.JUDGE_API_KEY?.toString()?.trim()
+                    if (!judgeApiKey) { judgeApiKey = '' }
                     sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             sh """
-ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
+# ---------- 1) 上传评测运行脚本 ----------
+# 说明:评测(MMMU 全量可达 ~50 小时)不再由单条长连接 ssh 承载——旧实现下
+# 网络闪断/Jenkins 重启会同时杀死 Jenkins 侧步骤与远程评测进程(ssh 会话退出
+# 触发 SIGHUP),损失全部已跑进度,且 catchError 降级后流水线继续拉取,
+# 只能拿到半成品快照。现改为:脚本落盘 → nohup 后台执行(脱离 ssh 会话)→
+# 短连接轮询;手动 abort 构建由本 stage 的 post{aborted} 钩子按 pidfile 终止远程进程树。
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p '${params.WORK_DIR}/${BUILD_OUTPUT_DIR}' && cat > '${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.sh'" << 'ENDSSH'
 set -e
+# 任何退出路径(set -e 中断/收到 TERM/正常结束)都写 exit-code 标记,供轮询判定
+trap 'echo "\$?" > "${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.rc"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 cd ${params.WORK_DIR}
 source .venv/bin/activate
 echo "Active uv venv: \${VIRTUAL_ENV}"
@@ -294,6 +339,18 @@ export KVB_STREAM="${params.STREAM}"
 export KVB_HTTP_PROXY="${params.HTTP_PROXY}"
 export KVB_HF_ENDPOINT="${params.HF_ENDPOINT}"
 export KVB_OUT_DIR="${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench"
+
+# BEAM(1M) 两阶段评测参数（仅 KVB_BENCH=beam 时消费）
+export KVB_BEAM_DATA="${params.BEAM_DATA}"
+export KVB_BEAM_PLAIN_TEXT="${params.BEAM_PLAIN_TEXT}"
+export KVB_BEAM_CONCURRENCY="${params.BEAM_CONCURRENCY}"
+export KVB_BEAM_TIMEOUT="${params.BEAM_TIMEOUT}"
+export KVB_BEAM_DRY_RUN="${params.BEAM_DRY_RUN}"
+export KVB_JUDGE_BASE_URL="${params.JUDGE_BASE_URL}"
+export KVB_JUDGE_API_KEY="${judgeApiKey}"
+export KVB_JUDGE_MODEL="${params.JUDGE_MODEL}"
+export KVB_JUDGE_TEMPERATURE="${params.JUDGE_TEMPERATURE}"
+export KVB_JUDGE_CONCURRENCY="${params.JUDGE_CONCURRENCY}"
 
 # per-task JSON 配置（单引号保护 JSON 内双引号；JSON 本身不含单引号，与 evalscope-test 传参方式一致）
 export KVB_TASK_LIMIT_JSON='${params.TASK_LIMIT_JSON}'
@@ -357,6 +414,9 @@ for BENCH in ${env.BENCHES}; do
         kimi_toolcall)
             export KVB_DATASET="${params.TOOLCALL_DATASET}"
             ;;
+        beam)
+            export KVB_DATASET=""
+            ;;
         *) echo "ERROR: unknown bench \$BENCH"; exit 1 ;;
     esac
     for EFFORT in ${env.EFFORTS}; do
@@ -389,8 +449,50 @@ if [ "\$FAILED" -ne 0 ]; then
     exit "\$FAILED"
 fi
 echo "Result: ALL BENCH RUNS PASSED"
-ENDSSH"""
+ENDSSH
+
+# ---------- 2) 幂等后台启动(pid 存活则恢复轮询,防止 step 重试导致双跑) ----------
+# 注意:payload 用单引号包裹(内部双引号原样传给远程),避免 agent 侧 bash 引号错位
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${REMOTE_USER}@${REMOTE_HOST} 'RUN_PID=\$(cat ${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.pid 2>/dev/null || true); if [ -n "\$RUN_PID" ] && [ -d /proc/\$RUN_PID ]; then echo "RESUME: 远程评测进程(PID=\$RUN_PID)仍在运行,恢复轮询"; else rm -f ${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.rc ${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.pid; cd ${params.WORK_DIR}; nohup bash ${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.sh > ${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.log 2>&1 < /dev/null & echo \$! > ${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.pid; echo "LAUNCHED: 后台评测已启动(PID=\$!)"; fi'
+
+# ---------- 3) 短连接轮询等待完成(单次 ssh 仅数秒,网络抖动自动重试) ----------
+POLL_INTERVAL_S=300
+MAX_WAIT_S=\$((7*24*3600))
+ELAPSED_S=0
+while true; do
+    ST=\$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${REMOTE_USER}@${REMOTE_HOST} "if [ -f '${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.rc' ]; then cat '${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.rc'; else echo RUNNING; fi" 2>/dev/null || true)
+    if [ -z "\$ST" ]; then
+        echo "[poll] 轮询 ssh 失败(网络抖动,可忽略),\${POLL_INTERVAL_S}s 后重试"
+        ST=RUNNING
+    fi
+    if [ "\$ST" = "RUNNING" ]; then
+        if [ "\$ELAPSED_S" -ge "\$MAX_WAIT_S" ]; then
+            echo "ERROR: 远程评测超过 \$((MAX_WAIT_S/3600)) 小时仍未结束,停止等待(远程进程可能已宕机,详见 ${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.log)"
+            exit 1
+        fi
+        echo "[poll] 评测运行中(已等待 \$((ELAPSED_S/60)) 分钟)——远程日志尾部:"
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${REMOTE_USER}@${REMOTE_HOST} "tail -n 5 '${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.log' 2>/dev/null" || true
+        sleep \$POLL_INTERVAL_S
+        ELAPSED_S=\$((ELAPSED_S + POLL_INTERVAL_S))
+        continue
+    fi
+    echo "[poll] 远程评测结束(exit=\$ST)——最后 40 行日志:"
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${REMOTE_USER}@${REMOTE_HOST} "tail -n 40 '${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.log' 2>/dev/null" || true
+    exit "\$ST"
+done
+"""
                         }
+                    }
+                }
+            }
+            post {
+                aborted {
+                    sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
+                        sh """
+# abort 构建时远程 nohup 进程已脱离 ssh 会话,须按 pidfile 递归终止整棵进程树
+# (仅覆盖本构建的 PID 及其子孙,不影响其他构建);先 TERM 宽限 10 秒再 KILL 残留
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${REMOTE_USER}@${REMOTE_HOST} 'RUN_PID=\$(cat ${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.pid 2>/dev/null || true); if [ -z "\$RUN_PID" ] || [ ! -d /proc/\$RUN_PID ]; then echo "SKIP: 远程评测进程不存在或已结束,无需清理"; rm -f ${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.pid; exit 0; fi; list_desc() { for c in \$(ps -o pid= --ppid "\$1" 2>/dev/null); do list_desc "\$c"; done; echo "\$1"; }; DESC=\$(list_desc "\$RUN_PID"); echo "终止远程评测进程树(PID: \$(echo \$DESC | tr \"\\n\" \" \"))"; kill -TERM \$DESC 2>/dev/null || true; sleep 10; STILL=""; for p in \$DESC; do if [ -d /proc/\$p ]; then STILL="\$STILL \$p"; fi; done; if [ -n "\$STILL" ]; then echo "KILL 未退出的残留进程:\$STILL"; kill -KILL \$STILL 2>/dev/null || true; fi; rm -f ${params.WORK_DIR}/${BUILD_OUTPUT_DIR}/bench_run_${BUILD_NUMBER}.pid; echo "远程评测已按 abort 终止"' || echo "WARN: abort 终止钩子 ssh 失败,远程进程将残留(由下次构建的环境准备 stage 兜底清理)"
+"""
                     }
                 }
             }
@@ -412,6 +514,11 @@ if ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "[ -d ${params.
     ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} "rm -f /tmp/kvv_bench_${BUILD_NUMBER}.tar.gz"
     echo "=== 拉取结果 ==="
     ls -la ./reports/${BUILD_NUMBER}/
+    if [ -f ./reports/${BUILD_NUMBER}/bench/bench_summary.properties ]; then
+        echo "OK: bench_summary.properties 已包含在拉取结果中"
+    else
+        echo "警告: 拉取结果中缺少 bench/bench_summary.properties(评测未完成/中断或 aggregate 失败),邮件将不显示评测汇总"
+    fi
 else
     echo "警告: 远程输出目录 ${params.WORK_DIR}/${BUILD_OUTPUT_DIR} 不存在，跳过结果拉取"
 fi
@@ -439,22 +546,26 @@ fi
 
                         def combos = [] as TreeSet
                         props.keySet().each { k ->
-                            def m = k =~ /^bench\.([^.]+)\.([^.]+)\.accuracy\$/
-                            if (m.matches()) { combos.add("${m[0][1]}/${m[0][2]}") }
+                            // 行尾锚点必须写裸 $:斜杠串里 \$ 会保留反斜杠,正则变成匹配字面 '$' 字符,永远匹配不上
+                            // (build #5/#6 邮件显示"未生成评测汇总"的直接根因)
+                            def m = k =~ /^bench\.([^.]+)\.([^.]+)\.accuracy$/
+                            if (m.matches()) { combos.add("${m[0][1]}/${m[0][2]}".toString()) }
                         }
 
                         def benchRows = new StringBuilder()
                         if (combos.isEmpty()) {
-                            benchRows.append('<tr><td colspan="6">未生成评测汇总（bench_summary.properties 缺失），请查看构建日志与附件。</td></tr>')
+                            benchRows.append("""<tr><td colspan="7">未生成评测汇总（bench_summary.properties 缺失）——通常因评测中断未完成或结果拉取失败，详见构建日志与附件 bench_run_${BUILD_NUMBER}.log。</td></tr>""")
                         } else {
                             combos.each { comboKey ->
                                 def (bench, effort) = comboKey.split('/')
-                                def acc = props["bench.${bench}.${effort}.accuracy"]
-                                def err = props["bench.${bench}.${effort}.stderr"]
-                                def done = props["bench.${bench}.${effort}.completed"]
-                                def total = props["bench.${bench}.${effort}.total"]
-                                def dur = props["bench.${bench}.${effort}.duration_s"]
-                                def status = props["bench.${bench}.${effort}.status"]
+                                // 查 key 用 String 拼接:GString 作 map key 因 hashCode 与 String 不一致会查不到
+                                def pfx = "bench.${bench}.${effort}".toString()
+                                def acc = props[pfx + '.accuracy']
+                                def err = props[pfx + '.stderr']
+                                def done = props[pfx + '.completed']
+                                def total = props[pfx + '.total']
+                                def dur = props[pfx + '.duration_s']
+                                def status = props[pfx + '.status']
                                 def color = (status == 'success') ? '#4CAF50' : '#f44336'
                                 benchRows.append("""
     <tr>
@@ -513,7 +624,7 @@ ${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; pad
     <tr><th>构建状态</th><td>${currentBuild.currentResult}</td></tr>
     <tr><th>执行时间</th><td>${currentBuild.durationString}</td></tr>
 </table>
-<p style="margin-top: 20px;">说明：基准评测为能力测量，无 PASS/FAIL 阈值；accuracy 为 inspect-ai scorer 输出。首跑会经代理下载 HuggingFace 数据集（MMMU 数 GB），之后走本地缓存。</p>
+<p style="margin-top: 20px;">说明：基准评测为能力测量，无 PASS/FAIL 阈值；accuracy 为 scorer 输出（inspect-ai scorer，或 BEAM 的 LLM-as-Judge 均分）。首跑会经代理下载 HuggingFace 数据集（MMMU 数 GB），之后走本地缓存。</p>
 <p>Jenkins 构建地址: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
 <div class="email-footer">此邮件由 Jenkins 自动发送，请勿回复。</div>
 </body>
@@ -524,7 +635,7 @@ ${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; pad
                             body: emailBody,
                             to: "${params.RECIPIENTS}",
                             mimeType: 'text/html',
-                            attachmentsPattern: "reports/${BUILD_NUMBER}/bench/**/bench_*.log,reports/${BUILD_NUMBER}/bench/bench_summary.properties"
+                            attachmentsPattern: "reports/${BUILD_NUMBER}/bench/**/bench_*.log,reports/${BUILD_NUMBER}/bench/bench_summary.properties,reports/${BUILD_NUMBER}/bench_run_${BUILD_NUMBER}.log"
                         )
                     }
                 }

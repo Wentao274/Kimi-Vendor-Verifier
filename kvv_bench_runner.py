@@ -15,6 +15,10 @@ things the upstream eval.py CLI does not provide:
 Task definitions, thinking-extra-body semantics and recommended parameters
 come from the upstream files; this runner only orchestrates them.
 
+The ``beam-summary`` subcommand aggregates the standalone BEAM (1M) two-phase
+scripts (beam_generate.py / beam_judge.py) into the same summary.json format,
+so BEAM rows flow into ``bench_summary.properties`` like the other benches.
+
 Run a single (bench, effort) combination:
 
     uv run --no-sync python kvv_bench_runner.py \
@@ -30,7 +34,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -192,6 +198,89 @@ def _first_metric(summary: dict, metric: str) -> float | None:
     return None
 
 
+def beam_summary(args: argparse.Namespace) -> int:
+    """Aggregate BEAM answers/scores into a summary.json compatible with
+    ``aggregate`` (bench/<bench>/<effort>/summary.json glob), so BEAM rows
+    flow into bench_summary.properties and the Jenkins email table."""
+
+    def read_jsonl(path: Path) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return rows
+
+    answers = read_jsonl(Path(args.answers))
+    scored = read_jsonl(Path(args.scores))
+    if not answers:
+        print(f"ERROR: no answers found in {args.answers}")
+        return 1
+    if not scored:
+        print(f"ERROR: no scores found in {args.scores}")
+        return 1
+
+    per_ability: dict[str, list[float]] = {}
+    for r in scored:
+        if isinstance(r.get("score"), (int, float)):
+            per_ability.setdefault(str(r.get("question_type", "unknown")),
+                                   []).append(float(r["score"]))
+    values = [v for vals in per_ability.values() for v in vals]
+    if not values:
+        print("ERROR: no numeric scores found")
+        return 1
+
+    accuracy = sum(values) / len(values)
+    stderr = (statistics.stdev(values) / math.sqrt(len(values))
+              if len(values) > 1 else 0.0)
+    generation_errors = sum(1 for r in answers if r.get("error"))
+    status = "success" if len(scored) >= len(answers) else "partial"
+
+    summary = {
+        "bench": "beam",
+        "effort": args.effort,
+        "model": args.model,
+        "think_mode": args.think_mode,
+        "beam_data": args.beam_data,
+        "plain_text": bool(args.plain_text),
+        "temperature": args.temperature,
+        "max_tokens": args.max_tokens or None,
+        "limit": args.limit or None,
+        "status": status,
+        "total_samples": len(answers),
+        "completed_samples": len(scored),
+        "generation_errors": generation_errors,
+        "scores": {"beam_judge": {"accuracy": round(accuracy, 4),
+                                  "stderr": round(stderr, 4)}},
+        "per_ability": {k: round(sum(v) / len(v), 4)
+                        for k, v in sorted(per_ability.items())},
+        "gen_duration_s": round(args.gen_duration, 1),
+        "judge_duration_s": round(args.judge_duration, 1),
+        "duration_s": round(args.gen_duration + args.judge_duration, 1),
+        "answers_file": args.answers,
+        "scores_file": args.scores,
+    }
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / "summary.json"
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"BEAM overall: {accuracy:.4f} +/- {stderr:.4f} "
+          f"({len(scored)}/{len(answers)} scored, "
+          f"{generation_errors} generation errors, status={status})")
+    for ability, vals in sorted(per_ability.items()):
+        print(f"  {ability}: {sum(vals) / len(vals):.4f} (n={len(vals)})")
+    print(f"summary written to: {summary_path}")
+    return 0 if status == "success" else 1
+
+
 def aggregate(root: str) -> int:
     root_path = Path(root)
     summary_files = sorted(root_path.glob("*/*/summary.json"))
@@ -262,11 +351,38 @@ def main() -> None:
     agg_parser.add_argument("root")
     agg_parser.set_defaults(func=aggregate)
 
+    bs_parser = sub.add_parser("beam-summary",
+                               help="aggregate BEAM answers/scores into summary.json")
+    bs_parser.add_argument("--answers", required=True,
+                           help="answers.jsonl from beam_generate.py")
+    bs_parser.add_argument("--scores", required=True,
+                           help="scores.jsonl from beam_judge.py")
+    bs_parser.add_argument("--out-dir", required=True,
+                           help="output dir for summary.json (= bench/beam/<effort>)")
+    bs_parser.add_argument("--effort", required=True,
+                           help="effort label used for the run dir (e.g. max)")
+    bs_parser.add_argument("--model", required=True)
+    bs_parser.add_argument("--think-mode", default="kimi")
+    bs_parser.add_argument("--beam-data", default="1m",
+                           help="BEAM data tag (1m / 128k)")
+    bs_parser.add_argument("--plain-text", action="store_true",
+                           help="answers were generated in plain-text mode")
+    bs_parser.add_argument("--temperature", type=float, default=1.0)
+    bs_parser.add_argument("--max-tokens", type=int, default=0)
+    bs_parser.add_argument("--limit", type=int, default=0)
+    bs_parser.add_argument("--gen-duration", type=float, default=0.0,
+                           help="generation phase duration in seconds")
+    bs_parser.add_argument("--judge-duration", type=float, default=0.0,
+                           help="judge phase duration in seconds")
+    bs_parser.set_defaults(func=beam_summary)
+
     args = parser.parse_args()
     if args.mode == "run":
         sys.exit(args.func(args))
     elif args.mode == "aggregate":
         sys.exit(aggregate(args.root))
+    elif args.mode == "beam-summary":
+        sys.exit(args.func(args))
     else:
         parser.print_help()
         sys.exit(2)
