@@ -40,7 +40,8 @@ pipeline {
         SSH_CREDENTIALS = 'HOST_SSH_KEY'
         REMOTE_HOST = '10.201.132.50'
         REMOTE_USER = 'root'
-        BUILD_OUTPUT_DIR = "builds/${params.TESTER}/${BUILD_NUMBER}"
+        // 目录分层 builds/<tester>/<model>/<build>/,model 名做文件系统安全化(与入口脚本一致)
+        BUILD_OUTPUT_DIR = "builds/${params.TESTER}/${params.MODEL.replaceAll('[^A-Za-z0-9._-]', '_')}/${BUILD_NUMBER}"
         // 用户在 BASE_URL 填根地址（可不带或带 /v1，可带或不带尾斜杠）。
         // 这里 idempotent 拼接出唯一的 OpenAI 兼容端点：
         //   先剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
@@ -280,7 +281,7 @@ fi
                             }
                         }
 
-                        def reportFile = sh(script: "ls reports/${BUILD_NUMBER}/*_report.html 2>/dev/null | head -1", returnStdout: true).trim()
+                        def reportFile = sh(script: "ls reports/${BUILD_NUMBER}/*_kvv_preflight_test*.html 2>/dev/null | head -1", returnStdout: true).trim()
                         def logFile = sh(script: "ls reports/${BUILD_NUMBER}/*.log 2>/dev/null | head -1", returnStdout: true).trim()
 
                         def reportStyle = ""
@@ -349,7 +350,7 @@ ${reportBody ?: '<p>未能生成 HTML 测试报告，请查看构建日志与附
 
                         def attachPatterns = []
                         if (reportFile && fileExists(reportFile)) {
-                            attachPatterns.add("reports/${BUILD_NUMBER}/*_report.html")
+                            attachPatterns.add("reports/${BUILD_NUMBER}/*_kvv_preflight_test*.html")
                         }
                         if (logFile && fileExists(logFile)) {
                             attachPatterns.add("reports/${BUILD_NUMBER}/*.log")
@@ -373,7 +374,13 @@ ${reportBody ?: '<p>未能生成 HTML 测试报告，请查看构建日志与附
                     sh """
 ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
 cd ${params.WORK_DIR}/builds/${params.TESTER} 2>/dev/null || exit 0
-ls -t | tail -n +21 | xargs -r rm -rf
+# 目录层级为 <model>/<build_number>/:每个模型目录内只保留最近 20 个构建,清空的模型目录移除
+for MODEL_DIR in */ ; do
+    if [ -d "\$MODEL_DIR" ]; then
+        ( cd "\$MODEL_DIR" 2>/dev/null && ls -t | tail -n +21 | xargs -r rm -rf )
+        rmdir "\$MODEL_DIR" 2>/dev/null || true
+    fi
+done
 ENDSSH"""
                 }
             }

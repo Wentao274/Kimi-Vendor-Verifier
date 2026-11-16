@@ -10,7 +10,7 @@ pipeline {
     }
 
     parameters {
-        string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填，基准评测构建目录分层 bench_builds/<tester>/<build>/，与功能验证流水线的 builds/ 互相隔离）')
+        string(name: 'TESTER', defaultValue: 'liwt', description: '测试人员名称（必填，基准评测构建目录分层 bench_builds/<tester>/<model>/<build>/，与功能验证流水线的 builds/ 互相隔离）')
         string(name: 'CHIP', defaultValue: 'nvidia-b300', description: '芯片平台名称(必填)')
         choice(name: 'ENGINE', choices: ['sglang', 'vllm'], description: '推理框架(必填,仅用于邮件展示)')
         choice(name: 'PD', choices: ['agg', 'disagg'], description: 'PD分离模式(agg=非PD分离,disagg=PD分离,仅用于邮件展示)')
@@ -72,7 +72,8 @@ pipeline {
         // 两条流水线是独立 Jenkins job,BUILD_NUMBER 各自计数、可能相同,
         // 基准评测产物走独立命名空间,避免同号构建目录互相嵌套、混入对方
         // tar 包、或被对方"保留最近 20 个"的清理逻辑误删
-        BUILD_OUTPUT_DIR = "bench_builds/${params.TESTER}/${BUILD_NUMBER}"
+        // 目录分层 bench_builds/<tester>/<model>/<build>/,model 名做文件系统安全化(与功能流水线一致)
+        BUILD_OUTPUT_DIR = "bench_builds/${params.TESTER}/${params.MODEL.replaceAll('[^A-Za-z0-9._-]', '_')}/${BUILD_NUMBER}"
         // 用户在 BASE_URL 填根地址（可不带或带 /v1，可带或不带尾斜杠）。
         // 这里 idempotent 拼接出唯一的 OpenAI 兼容端点：
         //   先剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
@@ -444,6 +445,20 @@ done
 echo "=== 汇总评测结果 ==="
 uv run --no-sync python kvv_bench_runner.py aggregate "\${BENCH_ROOT}" 2>&1 | tee -a "\${BENCH_ROOT}/bench_aggregate.log" || true
 
+# HTML 报告:读取 <bench>/<effort>/summary.json,落盘在 BENCH_ROOT 内,
+# 随 tar 拉回 reports/<N>/bench/ 并作为邮件附件发送;失败仅告警不影响构建结论
+echo "=== 生成基准评测 HTML 报告 ==="
+MODEL_SAFE="\${MODEL_NAME//[^A-Za-z0-9._-]/_}"
+REPORT_TS="\$(date +%Y%m%d%H%M%S)"
+REPORT_HTML="\${BENCH_ROOT}/\${MODEL_SAFE}_kvv_bench_test_report_\${REPORT_TS}.html"
+set +e
+uv run --no-sync python generate_bench_report.py --bench-root "\${BENCH_ROOT}" --model "\${MODEL_NAME}" --base-url "\${KIMI_BASE_URL}" --build-number "${BUILD_NUMBER}" --output "\${REPORT_HTML}" 2>&1 | tee -a "\${BENCH_ROOT}/bench_aggregate.log"
+REPORT_RC="\${PIPESTATUS[0]}"
+set -e
+if [ "\$REPORT_RC" -ne 0 ]; then
+    echo "WARN: bench report generation failed (exit=\$REPORT_RC); 评测结果与邮件汇总表不受影响"
+fi
+
 if [ "\$FAILED" -ne 0 ]; then
     echo "Result: SOME BENCH RUNS FAILED (last exit=\$FAILED)"
     exit "\$FAILED"
@@ -635,7 +650,7 @@ ${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; pad
                             body: emailBody,
                             to: "${params.RECIPIENTS}",
                             mimeType: 'text/html',
-                            attachmentsPattern: "reports/${BUILD_NUMBER}/bench/**/bench_*.log,reports/${BUILD_NUMBER}/bench/bench_summary.properties,reports/${BUILD_NUMBER}/bench_run_${BUILD_NUMBER}.log"
+                            attachmentsPattern: "reports/${BUILD_NUMBER}/bench/**/bench_*.log,reports/${BUILD_NUMBER}/bench/bench_summary.properties,reports/${BUILD_NUMBER}/bench/*_kvv_bench_test_report*.html,reports/${BUILD_NUMBER}/bench_run_${BUILD_NUMBER}.log"
                         )
                     }
                 }
@@ -648,7 +663,13 @@ ${connectivityFailed ? '<div style="background-color: #d32f2f; color: white; pad
                     sh """
 ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
 cd ${params.WORK_DIR}/bench_builds/${params.TESTER} 2>/dev/null || exit 0
-ls -t | tail -n +21 | xargs -r rm -rf
+# 目录层级为 <model>/<build_number>/:每个模型目录内只保留最近 20 个构建,清空的模型目录移除
+for MODEL_DIR in */ ; do
+    if [ -d "\$MODEL_DIR" ]; then
+        ( cd "\$MODEL_DIR" 2>/dev/null && ls -t | tail -n +21 | xargs -r rm -rf )
+        rmdir "\$MODEL_DIR" 2>/dev/null || true
+    fi
+done
 ENDSSH"""
                 }
             }

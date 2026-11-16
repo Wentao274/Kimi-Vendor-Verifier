@@ -550,7 +550,9 @@ def main() -> int:
 
     html = build_report(runs, tool_json, args.model, args.base_url, args.timestamp)
 
-    default_name = f"kkv_base_test_{args.timestamp}_report.html" if args.timestamp else "kkv_base_test_report.html"
+    safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", (args.model or "").strip()).strip("._-") or "unknown"
+    default_name = (f"{safe_model}_kvv_preflight_test_report_{args.timestamp}.html"
+                    if args.timestamp else f"{safe_model}_kvv_preflight_test_report.html")
     output = Path(args.output) if args.output else out_dir / default_name
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(html, encoding="utf-8")

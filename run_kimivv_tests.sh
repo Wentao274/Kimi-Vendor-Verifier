@@ -68,7 +68,7 @@ case "${KVV_SUITE}" in
 esac
 
 TIMESTAMP="$(date +%Y%m%d%H%M%S)"
-MODEL_NAME_SAFE="${MODEL_NAME//\//_}"
+MODEL_NAME_SAFE="${MODEL_NAME//[^A-Za-z0-9._-]/_}"
 if [ -n "${KVV_OUT_DIR}" ]; then
     OUT_DIR="${KVV_OUT_DIR}"
 else
@@ -180,7 +180,7 @@ elif [ "${KVV_SUITE}" = "tool_call_json_schema" ]; then
 fi
 
 # ---------- 生成 HTML 汇总报告（与本地 generate_test_report.py 格式一致） ----------
-REPORT_HTML="${OUT_DIR}/kkv_base_test_${TIMESTAMP}_report.html"
+REPORT_HTML="${OUT_DIR}/${MODEL_NAME_SAFE}_kvv_preflight_test_report_${TIMESTAMP}.html"
 set +e
 uv run --no-sync python generate_test_report.py \
     --out-dir "${OUT_DIR}" \

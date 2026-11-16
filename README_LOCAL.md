@@ -17,6 +17,7 @@ ssh 到测试主机执行、把报告/邮件发回**。
 | `generate_test_report.py` | HTML 汇总报告生成器 | 两个入口脚本共用,读 junit XML 出 HTML 报告 |
 | `run_kimivv_bench.sh` | Jenkins 基准评测入口 | 执行单个(评测任务×思考强度)组合,配置全通过 `KVB_*` 环境变量注入 |
 | `kvv_bench_runner.py` | 基准评测运行器 | 包装 inspect-ai 任务,补齐 `--limit` 与机读 `summary.json`,提供 `aggregate` 汇总模式 |
+| `generate_bench_report.py` | 基准评测 HTML 报告生成器 | 读 `bench/<bench>/<effort>/summary.json` 出 HTML 报告(aggregate 后调用,作为邮件附件) |
 | `JenkinsfileBench` | Jenkins 声明式流水线 | 基准评测(OCRBench/MMMU/ToolCall),与 `Jenkinsfile` 完全独立,见第 8 节 |
 
 两个入口脚本**相互独立、互不影响**:
@@ -144,7 +145,7 @@ outputs/kimi-k3_20261012123045/
 ├── junit_params_kimi.xml                       # params kimi 轮
 ├── junit_main.xml                              # 主套件轮
 ├── tool_call_schema_report.json                # tool 套件逐用例明细
-└── kkv_base_test_20261012123045_report.html    # HTML 汇总报告
+└── kimi-k3_kvv_preflight_test_report_20261012123045.html    # HTML 汇总报告
 ```
 
 HTML 报告由 `generate_test_report.py` 汇总目录下全部 junit XML 生成,
@@ -168,7 +169,7 @@ HTML 报告由 `generate_test_report.py` 汇总目录下全部 junit XML 生成,
 | `KVV_PARALLEL_JOBS` | `4` | pytest-xdist 并发数 |
 | `KVV_RERUNS` | `3` | 失败重试次数 |
 | `KVV_RERUNS_DELAY` | `2` | 重试间隔秒数 |
-| `KVV_OUT_DIR` | `outputs/<model>_<ts>` | 输出目录(Jenkins 固定注入 `builds/<tester>/<build>/`) |
+| `KVV_OUT_DIR` | `outputs/<model>_<ts>` | 输出目录(Jenkins 固定注入 `builds/<tester>/<model>/<build>/`) |
 | `KVV_CASE_DIR` | `testdata/walle_validator_cases/validator_cases` | tool 套件用例目录 |
 | `KVV_SELECTION` | `all` | tool 套件选择模式 all/explicit/object |
 | `KVV_MAX_CASES` | 空 | tool 套件用例数上限(空=不限) |
@@ -203,7 +204,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 | 运行测试 | `source .venv/bin/activate` 后注入全部环境变量,执行 `bash run_kimivv_tests.sh`;`catchError` 包裹,失败置 FAILURE 但不阻塞后续 stage |
 | 拉取报告到Jenkins | 远程 `tar -czf` → `scp` 拉回 → 解压到本地 `reports/<build>/` |
 | 发送邮件 | 解析 `stats.properties` 渲染统计表 + 提取 HTML 报告的 `<style>`/`<body>` 内嵌,附报告与日志;`catchError` 包裹,永远执行 |
-| 清理旧构建 | 远程 `builds/<tester>/` 只保留最近 20 个构建目录 |
+| 清理旧构建 | 远程 `builds/<tester>/<model>/` 每个模型只保留最近 20 个构建目录(清空的模型目录移除) |
 
 连通性预检失败时:运行/拉取 stage 被跳过,邮件照常发出,内含红色
 告警框提示检查 BASE_URL / API_KEY。
@@ -217,7 +218,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 
 | Jenkins 参数 | 透传目标 | 默认值 | 说明 |
 |--------------|----------|--------|------|
-| `TESTER` | 目录分层 | `liwt` | 测试人员,`builds/<tester>/<build>/` |
+| `TESTER` | 目录分层 | `liwt` | 测试人员,`builds/<tester>/<model>/<build>/` |
 | `CHIP` | 邮件展示 | `nvidia-b300` | 芯片平台名称 |
 | `ENGINE` | 邮件展示 | `sglang` | 推理框架(sglang/vllm) |
 | `PD` | 邮件展示 | `agg` | PD 分离模式(agg=非PD分离,disagg=PD分离) |
@@ -241,13 +242,13 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 ### 5.3 远程目录与产物层级
 
 ```
-<WORK_DIR>/builds/<tester>/<build_number>/          # KVV_OUT_DIR(Jenkins 注入)
+<WORK_DIR>/builds/<tester>/<model>/<build_number>/      # KVV_OUT_DIR(Jenkins 注入,model 名安全化)
 ├── kkv_base_test_<ts>.log                          # 全程总日志(邮件附件)
 ├── junit_params_opensource.xml
 ├── junit_params_kimi.xml
 ├── junit_main.xml
 ├── tool_call_schema_report.json
-├── kkv_base_test_<ts>_report.html                  # HTML 汇总报告(邮件附件+内嵌)
+├── <model>_kvv_preflight_test_report_<ts>.html         # HTML 汇总报告(邮件附件+内嵌)
 └── stats.properties                                # 邮件统计解析用
 
 <Jenkins 工作空间>/reports/<build_number>/          # 拉取报告到Jenkins后
@@ -262,7 +263,7 @@ Jenkins 通过 ssh 远程到 `REMOTE_HOST`(默认 `10.201.132.50`),在
 - **数据源**:`stats.properties`(由 `run_kimivv_tests.sh` 结尾生成),
   含 total/passed/failed/skipped/errors/rate/result
 - **正文构成**:结果横幅(PASS 绿 / FAIL 红) + Jenkins 构建信息表 +
-  HTML 报告正文(从 `kkv_base_test_<ts>_report.html` 提取 `<style>` 与
+  HTML 报告正文(从 `<model>_kvv_preflight_test_report_<ts>.html` 提取 `<style>` 与
   `<body>` 内嵌,与本地报告格式完全一致) + 构建链接
 - **连通性失败**:红色告警框提示未执行测试,统计列显示 N/A
 - **附件**:HTML 报告 + 全程日志
@@ -336,10 +337,10 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 | 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
 | API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
 | 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench\|beam_generate\|beam_judge"`,排除 run_kimivv_tests,**不会误杀并发运行中的功能验证进程**) → `git lfs pull`(经代理,含 kimi_toolcall 与 BEAM 数据) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
-| 运行评测 | 评测脚本经 ssh 上传到远程后由 `nohup` **后台执行**(MMMU 全量 ~50 小时,不能由单条长连接 ssh 承载),Jenkins 侧每 5 分钟用**短连接轮询** exit-code 标记并回显日志尾部,网络抖动只损失单次轮询;脚本内 `source .venv/bin/activate` → 校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败) → 双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`(beam 走脚本内两阶段分支),单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties`。任何退出路径(含 set -e 中断)都写 exit-code 标记,step 重试时按 pid 检测避免双跑 |
-| 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志、`bench_run_<N>.log/sh/rc`);**显式校验 bench_summary.properties 已包含**,缺失时打警告(邮件将不显示汇总) |
-| 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值 |
-| 清理旧构建 | 远程 `bench_builds/<tester>/` 只保留最近 20 个(独立命名空间,不触碰功能验证的 `builds/`) |
+| 运行评测 | 评测脚本经 ssh 上传到远程后由 `nohup` **后台执行**(MMMU 全量 ~50 小时,不能由单条长连接 ssh 承载),Jenkins 侧每 5 分钟用**短连接轮询** exit-code 标记并回显日志尾部,网络抖动只损失单次轮询;脚本内 `source .venv/bin/activate` → 校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败) → 双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`(beam 走脚本内两阶段分支),单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties`,再由 `generate_bench_report.py` 生成 HTML 报告 `<model>_kvv_bench_test_report_<时间戳>.html`(落在 bench 目录内随结果拉回,失败仅告警不影响构建结论)。任何退出路径(含 set -e 中断)都写 exit-code 标记,step 重试时按 pid 检测避免双跑 |
+| 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志、`bench_run_<N>.log/sh/rc`、HTML 报告);**显式校验 bench_summary.properties 已包含**,缺失时打警告(邮件将不显示汇总) |
+| 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值;附件含各组合 bench 日志、`bench_summary.properties`、HTML 报告与 `bench_run_<N>.log` |
+| 清理旧构建 | 远程 `bench_builds/<tester>/<model>/` 每个模型只保留最近 20 个构建目录(独立命名空间,不触碰功能验证的 `builds/`) |
 
 ### 8.3 环境准备与虚拟环境
 
@@ -399,8 +400,8 @@ OCRBench/MMMU 首次运行会从 HuggingFace 下载数据集(需 `KVB_HTTP_PROXY
 
 - **与功能验证流水线的产物隔离**:两条流水线是独立 Jenkins job,
   BUILD_NUMBER 各自计数、**完全可能相同**,因此远程产物命名空间彻底
-  分开——功能验证用 `builds/<tester>/<N>`,基准评测用
-  `bench_builds/<tester>/<N>`,各自的"保留最近 20 个构建"清理只作用于
+  分开——功能验证用 `builds/<tester>/<model>/<N>`,基准评测用
+  `bench_builds/<tester>/<model>/<N>`,各自的"保留最近 20 个构建"清理只作用于
   自己的命名空间;`/tmp` 中转包分别为 `kvv_<N>.tar.gz` 与
   `kvv_bench_<N>.tar.gz`,两 job 同号构建并发也不会互相覆盖。Jenkins
   控制器侧的 `reports/<N>/` 位于各 job 自己的 workspace,天然隔离。

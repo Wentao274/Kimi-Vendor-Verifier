@@ -28,6 +28,7 @@ outputs/
 
 # Jenkins build outputs (remote side)
 builds/
+bench_builds/
 
 # Temporary debug scripts
 retry_*.py

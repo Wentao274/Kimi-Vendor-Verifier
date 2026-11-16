@@ -33,7 +33,7 @@ if [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 TIMESTAMP="$(date +%Y%m%d%H%M%S)"
-MODEL_NAME_SAFE="${MODEL_NAME//\//_}"
+MODEL_NAME_SAFE="${MODEL_NAME//[^A-Za-z0-9._-]/_}"
 OUT_DIR="outputs/${MODEL_NAME_SAFE}_${TIMESTAMP}"
 LOG_FILE="${OUT_DIR}/kkv_base_test_${TIMESTAMP}.log"
 # 各轮 pytest 仅输出 junit XML 到本目录；测试结束后由 generate_test_report.py
@@ -123,7 +123,7 @@ if [ "${STATUS_PARAMS_KIMI}" -ne 0 ] && [ "${OVERALL_STATUS}" -eq 0 ]; then OVER
 if [ "${STATUS_MAIN}" -ne 0 ] && [ "${OVERALL_STATUS}" -eq 0 ]; then OVERALL_STATUS=${STATUS_MAIN}; fi
 
 # ---------- 生成 HTML 汇总报告 ----------
-REPORT_HTML="${OUT_DIR}/kkv_base_test_${TIMESTAMP}_report.html"
+REPORT_HTML="${OUT_DIR}/${MODEL_NAME_SAFE}_kvv_preflight_test_report_${TIMESTAMP}.html"
 set +e
 uv run --no-sync python generate_test_report.py \
     --out-dir "${OUT_DIR}" \
