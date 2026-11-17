@@ -46,7 +46,7 @@ pipeline {
         // 按任务配置（JSON，与 evalscope-test 流水线的 TASK_MAX_TOKENS_JSON 风格一致）：
         // 每个维度一个 JSON 参数，键 = 评测任务名，须覆盖所有勾选任务，缺失/不合法则运行评测开始时校验失败
         text(name: 'TASK_LIMIT_JSON', defaultValue: '{"ocrbench": null, "mmmu": null, "kimi_toolcall": null, "beam": null}', description: '按任务指定样本上限的 JSON。键=ocrbench/mmmu/kimi_toolcall/beam，值=null（全量）或正整数；须覆盖所有勾选任务，缺失或不合法则校验失败。全量口径：OCRBench 1000 / MMMU 约 1.17 万（单轮数亿 token，请预留充足时长）/ kimi_toolcall 70 / BEAM 700。快速验证示例：{"ocrbench": 200, "mmmu": 100, "kimi_toolcall": 70, "beam": 5}')
-        text(name: 'TASK_MAX_TOKENS_JSON', defaultValue: '{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768, "beam": 65536}', description: '按任务指定单次响应最大 tokens 的 JSON（默认 = README「Recommended Benchmark Parameters (K3)」：OCRBench 16384 / MMMU 98304 / kimi_toolcall 32768；beam 65536 = 上游 BEAM 脚本默认）。键=评测任务名，值=正整数；须覆盖所有勾选任务，缺失或不合法则校验失败')
+        text(name: 'TASK_MAX_TOKENS_JSON', defaultValue: '{"ocrbench": 16384, "mmmu": 65536, "kimi_toolcall": 32768, "beam": 65536}', description: '按任务指定单次响应最大 tokens 的 JSON（默认：OCRBench 16384 / MMMU 65536（本地口径；上游 README「Recommended Benchmark Parameters (K3)」推荐 98304，可按需覆盖）/ kimi_toolcall 32768；beam 65536 = 上游 BEAM 脚本默认）。键=评测任务名，值=正整数；须覆盖所有勾选任务，缺失或不合法则校验失败')
 
         // 以下默认值 = README「Recommended Benchmark Parameters (K3)」
         string(name: 'TEMPERATURE', defaultValue: '1.0', description: '采样温度（README K3 推荐值 1.0；non-thinking 轮可改 0.6）')
@@ -325,6 +325,21 @@ if [ -z "\${VIRTUAL_ENV:-}" ]; then
     echo "ERROR: uv venv activation failed" >&2
     exit 1
 fi
+
+# 本脚本经 ssh "<cmd>" + nohup 启动,是非登录 shell,不会加载 /etc/profile 与
+# ~/.profile;uv 通常装在 ~/.local/bin(官方安装器默认)而不在 sshd 默认 PATH,
+# 会导致 aggregate/HTML 报告与 run_kimivv_bench.sh 内的 uv run 全部 127。
+# 显式补齐 PATH,仍找不到时加载 profile 兜底,最终缺失则快速失败。
+export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"
+if ! command -v uv >/dev/null 2>&1; then
+    . /etc/profile >/dev/null 2>&1 || true
+    . "\$HOME/.profile" >/dev/null 2>&1 || true
+    export PATH="\${VIRTUAL_ENV}/bin:\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"
+fi
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv 不在 PATH 中(非登录 shell 启动,未加载 profile);请确认远程 uv 安装位置" >&2
+    exit 1
+}
 
 export KIMI_BASE_URL="${env.BASE_URL_V1}"
 export KIMI_API_KEY="${apiKey}"

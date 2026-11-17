@@ -297,14 +297,15 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 (样本上限,值 `null`=全量,默认
 `{"ocrbench": null, "mmmu": null, "kimi_toolcall": null, "beam": null}`)与
 `TASK_MAX_TOKENS_JSON`(单次响应最大 tokens,默认
-`{"ocrbench": 16384, "mmmu": 98304, "kimi_toolcall": 32768, "beam": 65536}`)。
+`{"ocrbench": 16384, "mmmu": 65536, "kimi_toolcall": 32768, "beam": 65536}`)。
 每个维度一个 JSON,键=评测任务名,**须覆盖所有勾选任务**,运行评测开始时统一
-校验,缺键/非法则快速失败。下表为两个 JSON 参数的默认值(即 K3 推荐口径):
+校验,缺键/非法则快速失败。下表为两个 JSON 参数的默认值(MMMU 为本地口径
+65536,其余为 K3 推荐口径):
 
 | 评测任务 | 数据来源 | 样本上限默认 | MaxTokens 默认 | 说明 |
 |----------|----------|--------------|----------------|------|
 | OCRBench | HF `echo840/OCRBench`(首次经代理下载并缓存) | 空(全量 1000) | 16384 | 文本识别基准,单图短答 |
-| MMMU | HF `MMMU/MMMU_Pro` standard (10 options)(数 GB,首次下载慢) | 空(全量约 1.17 万) | 98304 | 多模态选择题,1~7 图/题;全量单轮数亿 token,请预留充足时长,快速验证时可用 `TASK_LIMIT_JSON` 截断 |
+| MMMU | HF `MMMU/MMMU_Pro` standard (10 options)(数 GB,首次下载慢) | 空(全量约 1.17 万) | 65536(上游推荐 98304,本地口径下调) | 多模态选择题,1~7 图/题;全量单轮数亿 token,请预留充足时长,快速验证时可用 `TASK_LIMIT_JSON` 截断 |
 | ToolCall | 仓库内 LFS `toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl`(全量 70 样本) | 空(全量) | 32768 | 即 README K3 表「Tool Call」(`kimi_toolcall`),评分 tool_calls 格式/合法性;**默认勾选** |
 | BEAM | 仓库内 LFS `beam/data/beam_1m_chats.jsonl.gz`(35 对话×20 题=700 题,另有 128k 变体) | 空(全量 700) | 65536 | 1M 长程记忆基准,独立两阶段脚本(生成+LLM 判分),**默认不勾选**;详见 8.4 |
 
@@ -337,7 +338,7 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 | 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
 | API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
 | 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench\|beam_generate\|beam_judge"`,排除 run_kimivv_tests,**不会误杀并发运行中的功能验证进程**) → `git lfs pull`(经代理,含 kimi_toolcall 与 BEAM 数据) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
-| 运行评测 | 评测脚本经 ssh 上传到远程后由 `nohup` **后台执行**(MMMU 全量 ~50 小时,不能由单条长连接 ssh 承载),Jenkins 侧每 5 分钟用**短连接轮询** exit-code 标记并回显日志尾部,网络抖动只损失单次轮询;脚本内 `source .venv/bin/activate` → 校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败) → 双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`(beam 走脚本内两阶段分支),单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties`,再由 `generate_bench_report.py` 生成 HTML 报告 `<model>_kvv_bench_test_report_<时间戳>.html`(落在 bench 目录内随结果拉回,失败仅告警不影响构建结论)。任何退出路径(含 set -e 中断)都写 exit-code 标记,step 重试时按 pid 检测避免双跑 |
+| 运行评测 | 评测脚本经 ssh 上传到远程后由 `nohup` **后台执行**(MMMU 全量 ~50 小时,不能由单条长连接 ssh 承载),Jenkins 侧每 5 分钟用**短连接轮询** exit-code 标记并回显日志尾部,网络抖动只损失单次轮询;脚本内 `source .venv/bin/activate` → **补齐 uv PATH**(nohup 经 `ssh "<cmd>"` 为非登录 shell,不加载 profile,uv 在 `~/.local/bin` 不在默认 PATH;显式 export + profile 兜底 + 缺失快速失败,否则 `uv run` 全部 127) → 校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败) → 双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`(beam 走脚本内两阶段分支),单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties`,再由 `generate_bench_report.py` 生成 HTML 报告 `<model>_kvv_bench_test_report_<时间戳>.html`(落在 bench 目录内随结果拉回,失败仅告警不影响构建结论)。任何退出路径(含 set -e 中断)都写 exit-code 标记,step 重试时按 pid 检测避免双跑 |
 | 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志、`bench_run_<N>.log/sh/rc`、HTML 报告);**显式校验 bench_summary.properties 已包含**,缺失时打警告(邮件将不显示汇总) |
 | 发送邮件 | accuracy 汇总表(任务×强度)+ 构建信息;基准为能力测量,无 PASS/FAIL 阈值;附件含各组合 bench 日志、`bench_summary.properties`、HTML 报告与 `bench_run_<N>.log` |
 | 清理旧构建 | 远程 `bench_builds/<tester>/<model>/` 每个模型只保留最近 20 个构建目录(独立命名空间,不触碰功能验证的 `builds/`) |

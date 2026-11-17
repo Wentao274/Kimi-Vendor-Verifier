@@ -23,7 +23,7 @@ Run a single (bench, effort) combination:
 
     uv run --no-sync python kvv_bench_runner.py \
         --bench mmmu --model kimi-k3 --effort max --limit 100 \
-        --max-tokens 98304 --out-dir builds/t/1/bench/mmmu/max
+        --max-tokens 65536 --out-dir builds/t/1/bench/mmmu/max
 
 Aggregate all runs under a bench root directory:
 
