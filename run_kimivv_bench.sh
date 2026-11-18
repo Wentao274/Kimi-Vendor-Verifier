@@ -86,6 +86,16 @@ KVB_JUDGE_MODEL="${KVB_JUDGE_MODEL:-kimi-k2.6}"
 KVB_JUDGE_TEMPERATURE="${KVB_JUDGE_TEMPERATURE:-1.0}"
 KVB_JUDGE_CONCURRENCY="${KVB_JUDGE_CONCURRENCY:-10}"
 
+# 去除两个 URL 两端空白:粘贴参数时常见的尾随空格会让 OpenAI 客户端拼出
+# "/v1 /chat/completions" 这类 404 路径(判分调用重试耗尽后按 0 分计,成绩失真)
+# JenkinsfileBench 侧已 trim,这里兜底手动调用场景
+KIMI_BASE_URL="${KIMI_BASE_URL:-}"
+KVB_JUDGE_BASE_URL="${KVB_JUDGE_BASE_URL:-}"
+KIMI_BASE_URL="${KIMI_BASE_URL#"${KIMI_BASE_URL%%[![:space:]]*}"}"
+KIMI_BASE_URL="${KIMI_BASE_URL%"${KIMI_BASE_URL##*[![:space:]]}"}"
+KVB_JUDGE_BASE_URL="${KVB_JUDGE_BASE_URL#"${KVB_JUDGE_BASE_URL%%[![:space:]]*}"}"
+KVB_JUDGE_BASE_URL="${KVB_JUDGE_BASE_URL%"${KVB_JUDGE_BASE_URL##*[![:space:]]}"}"
+
 EFFORT_LABEL="${KVB_EFFORT:-legacy}"
 RUN_DIR="${KVB_OUT_DIR}/${KVB_BENCH}/${EFFORT_LABEL}"
 LOG_FILE="${RUN_DIR}/bench_${KVB_BENCH}_${EFFORT_LABEL}.log"

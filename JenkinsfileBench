@@ -76,8 +76,10 @@ pipeline {
         BUILD_OUTPUT_DIR = "bench_builds/${params.TESTER}/${params.MODEL.replaceAll('[^A-Za-z0-9._-]', '_')}/${BUILD_NUMBER}"
         // 用户在 BASE_URL 填根地址（可不带或带 /v1，可带或不带尾斜杠）。
         // 这里 idempotent 拼接出唯一的 OpenAI 兼容端点：
-        //   先剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
-        BASE_URL_V1 = "${params.BASE_URL.replaceAll('/+$', '').replaceAll('/?v1$', '')}/v1"
+        //   先 trim 两端空白(粘贴时常见的尾随空格会让请求打到 "/v1 /chat/completions"
+        //   这类 404 路径,#14 构建即因 JUDGE_BASE_URL 尾随空格全量判分 404)
+        //   → 再剥尾斜杠 → 再剥结尾 /v1（若有）→ 统一补 /v1
+        BASE_URL_V1 = "${params.BASE_URL.trim().replaceAll('/+$', '').replaceAll('/?v1$', '')}/v1"
     }
 
     stages {
@@ -180,6 +182,8 @@ pipeline {
                     script {
                         def apiKey = params.API_KEY?.toString()?.trim()
                         if (!apiKey) { apiKey = 'EMPTY' }
+                        def judgeApiKey = params.JUDGE_API_KEY?.toString()?.trim()
+                        def judgeBaseUrl = params.JUDGE_BASE_URL?.toString()?.trim()
                         try {
                             sh """
 ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'ENDSSH'
@@ -205,6 +209,29 @@ set -o pipefail
         exit 1
     fi
     echo "Chat Completions 接口检查通过, HTTP状态码: \${CHAT_HTTP_CODE}"
+
+    if [ -n "${judgeBaseUrl}" ]; then
+        echo "=== 检查 BEAM 判分端点连通性 (/models) ==="
+        JUDGE_CODE=\$(curl -s --connect-timeout 10 -m 30 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${judgeApiKey}" ${judgeBaseUrl}/models)
+        if [ "\${JUDGE_CODE}" != "200" ]; then
+            echo "ERROR: BEAM 判分端点检查失败, HTTP状态码: \${JUDGE_CODE}, URL: ${judgeBaseUrl}/models (URL/Key 不正确或端点不可达;注意勿带多余空格)"
+            exit 1
+        fi
+        echo "BEAM 判分端点 /models 检查通过, HTTP状态码: \${JUDGE_CODE}"
+
+        echo "=== 检查 BEAM 判分模型可用性 (chat/completions) ==="
+        JUDGE_RESP=\$(curl -s --connect-timeout 10 -m 60 -w "\\n%{http_code}" ${judgeBaseUrl}/chat/completions \\
+            -H "Content-Type: application/json" \\
+            -H "Authorization: Bearer ${judgeApiKey}" \\
+            -d '{"model":"${params.JUDGE_MODEL}","messages":[{"role":"user","content":"ping"}],"max_tokens":1}')
+        JUDGE_CHAT_CODE=\$(echo "\${JUDGE_RESP}" | tail -1)
+        if [ "\${JUDGE_CHAT_CODE}" != "200" ]; then
+            echo "ERROR: BEAM 判分模型检查失败, HTTP状态码: \${JUDGE_CHAT_CODE} (判分模型 ${params.JUDGE_MODEL} 不可用或 URL/Key 不正确)"
+            echo "响应内容: \$(echo "\${JUDGE_RESP}" | head -n -1)"
+            exit 1
+        fi
+        echo "BEAM 判分模型可用性检查通过, 判分模型: ${params.JUDGE_MODEL}, HTTP状态码: \${JUDGE_CHAT_CODE}"
+    fi
 } 2>&1 | tee /tmp/kvv_bench_connectivity_${BUILD_NUMBER}.log
 ENDSSH
 """
@@ -303,6 +330,7 @@ ENDSSH"""
                     if (!apiKey) { apiKey = 'EMPTY' }
                     def judgeApiKey = params.JUDGE_API_KEY?.toString()?.trim()
                     if (!judgeApiKey) { judgeApiKey = '' }
+                    def judgeBaseUrl = params.JUDGE_BASE_URL?.toString()?.trim()
                     sshagent(credentials: ["${SSH_CREDENTIALS}"]) {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             sh """
@@ -362,7 +390,7 @@ export KVB_BEAM_PLAIN_TEXT="${params.BEAM_PLAIN_TEXT}"
 export KVB_BEAM_CONCURRENCY="${params.BEAM_CONCURRENCY}"
 export KVB_BEAM_TIMEOUT="${params.BEAM_TIMEOUT}"
 export KVB_BEAM_DRY_RUN="${params.BEAM_DRY_RUN}"
-export KVB_JUDGE_BASE_URL="${params.JUDGE_BASE_URL}"
+export KVB_JUDGE_BASE_URL="${judgeBaseUrl}"
 export KVB_JUDGE_API_KEY="${judgeApiKey}"
 export KVB_JUDGE_MODEL="${params.JUDGE_MODEL}"
 export KVB_JUDGE_TEMPERATURE="${params.JUDGE_TEMPERATURE}"

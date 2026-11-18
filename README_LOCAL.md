@@ -336,7 +336,7 @@ evalscope-test 流水线的 `TASK_MAX_TOKENS_JSON` 一致):`TASK_LIMIT_JSON`
 |-------|------|
 | 打印评测参数 | 回显所有入参(含 BASE_URL 拼接结果) |
 | 评测项校验 | 任务/强度至少各勾选一个,否则快速失败;打印将执行的组合清单 |
-| API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续 |
+| API 连通性预检 | 同 `Jenkinsfile`(models + chat/completions),失败置 UNSTABLE 并跳过后续;**配置了 `JUDGE_BASE_URL` 时额外探测判分端点**(/models + 以 `JUDGE_MODEL` 发 1 条最小 chat 请求,404/401 等提前失败,避免烧完评测拿到"判分全 404→0 分"的假报告,#14 即此类故障) |
 | 环境准备 | 清理残留评测进程(`pgrep -af "kvv_bench_runner\|run_kimivv_bench\|beam_generate\|beam_judge"`,排除 run_kimivv_tests,**不会误杀并发运行中的功能验证进程**) → `git lfs pull`(经代理,含 kimi_toolcall 与 BEAM 数据) → `uv venv` + `uv pip install -r pyproject.toml`(不走代理,直连 pypi) |
 | 运行评测 | 评测脚本经 ssh 上传到远程后由 `nohup` **后台执行**(MMMU 全量 ~50 小时,不能由单条长连接 ssh 承载),Jenkins 侧每 5 分钟用**短连接轮询** exit-code 标记并回显日志尾部,网络抖动只损失单次轮询;脚本内 `source .venv/bin/activate` → **补齐 uv PATH**(nohup 经 `ssh "<cmd>"` 为非登录 shell,不加载 profile,uv 在 `~/.local/bin` 不在默认 PATH;显式 export + profile 兜底 + 缺失快速失败,否则 `uv run` 全部 127) → 校验 `TASK_LIMIT_JSON`/`TASK_MAX_TOKENS_JSON`(缺键/非法快速失败) → 双层循环(任务×强度)按 JSON 解析每任务的 limit/max_tokens 调 `run_kimivv_bench.sh`(beam 走脚本内两阶段分支),单组合失败不中断;结束后 `kvv_bench_runner.py aggregate` 生成 `bench_summary.properties`,再由 `generate_bench_report.py` 生成 HTML 报告 `<model>_kvv_bench_test_report_<时间戳>.html`(落在 bench 目录内随结果拉回,失败仅告警不影响构建结论)。任何退出路径(含 set -e 中断)都写 exit-code 标记,step 重试时按 pid 检测避免双跑 |
 | 拉取结果到Jenkins | tar → scp → 解包 `reports/<build>/`(含 `bench/<bench>/<effort>/summary.json` 与 inspect 日志、`bench_run_<N>.log/sh/rc`、HTML 报告);**显式校验 bench_summary.properties 已包含**,缺失时打警告(邮件将不显示汇总) |
@@ -393,6 +393,11 @@ export KVB_JUDGE_BASE_URL="http://127.0.0.1:3001/v1"
 export KVB_JUDGE_API_KEY="EMPTY"
 ./run_kimivv_bench.sh
 ```
+
+两个 URL(`KIMI_BASE_URL`/`KVB_JUDGE_BASE_URL`)在脚本内会**自动 trim 两端空白**
+(`run_kimivv_bench.sh`;Jenkins 侧 `JenkinsfileBench` 对 `BASE_URL`/`JUDGE_BASE_URL`
+参数同样 trim)——尾随空格会让判分请求打到 `/v1 /chat/completions` 这类 404 路径,
+且判分重试耗尽后上游 beam_judge 按 0 分计(never-crash 设计),产出失真的 0 分成绩。
 
 OCRBench/MMMU 首次运行会从 HuggingFace 下载数据集(需 `KVB_HTTP_PROXY`
 或 `KVB_HF_ENDPOINT`),之后走本地缓存。
